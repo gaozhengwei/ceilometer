@@ -14,21 +14,20 @@
 # under the License.
 """Tests for Ceilometer notify daemon."""
 
-import shutil
+import time
 
 import mock
-from oslo_config import fixture as fixture_config
 import oslo_messaging
 from oslo_utils import fileutils
-from oslo_utils import timeutils
 import six
 from stevedore import extension
 import yaml
 
-from ceilometer.compute.notifications import instance
+from ceilometer.agent import plugin_base
 from ceilometer import messaging
 from ceilometer import notification
 from ceilometer.publisher import test as test_publisher
+from ceilometer import service
 from ceilometer.tests import base as tests_base
 
 TEST_NOTICE_CTXT = {
@@ -83,21 +82,32 @@ TEST_NOTICE_PAYLOAD = {
 }
 
 
+class _FakeNotificationPlugin(plugin_base.NotificationBase):
+    event_types = ['fake.event']
+
+    def get_targets(self, conf):
+        return [oslo_messaging.Target(
+            topic=topic, exchange=conf.nova_control_exchange)
+            for topic in self.get_notification_topics(conf)]
+
+    def process_notification(self, message):
+        return []
+
+
 class TestNotification(tests_base.BaseTestCase):
 
     def setUp(self):
         super(TestNotification, self).setUp()
-        self.CONF = self.useFixture(fixture_config.Config()).conf
+        self.CONF = service.prepare_service([], [])
         self.CONF.set_override("connection", "log://", group='database')
-        self.CONF.set_override("backend_url", None, group="coordination")
-        self.CONF.set_override("store_events", False, group="notification")
-        self.CONF.set_override("disable_non_metric_meters", False,
-                               group="notification")
+        self.CONF.set_override("backend_url", "zake://", group="coordination")
+        self.CONF.set_override("workload_partitioning", True,
+                               group='notification')
         self.setup_messaging(self.CONF)
-        self.srv = notification.NotificationService(0)
+        self.srv = notification.NotificationService(0, self.CONF)
 
     def fake_get_notifications_manager(self, pm):
-        self.plugin = instance.Instance(pm)
+        self.plugin = _FakeNotificationPlugin(pm)
         return extension.ExtensionManager.make_test_instance(
             [
                 extension.Extension('test',
@@ -108,6 +118,7 @@ class TestNotification(tests_base.BaseTestCase):
         )
 
     @mock.patch('ceilometer.pipeline.setup_pipeline', mock.MagicMock())
+    @mock.patch('ceilometer.pipeline.setup_event_pipeline', mock.MagicMock())
     @mock.patch('ceilometer.event.endpoint.EventsNotificationEndpoint')
     def _do_process_notification_manager_start(self,
                                                fake_event_endpoint_class):
@@ -134,29 +145,22 @@ class TestNotification(tests_base.BaseTestCase):
                            'payload': TEST_NOTICE_PAYLOAD,
                            'metadata': TEST_NOTICE_METADATA}])
 
-        self.assertEqual(1, len(self.srv.listeners[0].dispatcher.endpoints))
-        self.assertTrue(self.srv.pipeline_manager.publisher.called)
-
-    def test_process_notification_no_events(self):
-        self._do_process_notification_manager_start()
-        self.assertEqual(1, len(self.srv.listeners[0].dispatcher.endpoints))
-        self.assertNotEqual(self.fake_event_endpoint,
-                            self.srv.listeners[0].dispatcher.endpoints[0])
+        self.assertEqual(2, len(self.srv.listeners[0].dispatcher.endpoints))
 
     @mock.patch('ceilometer.pipeline.setup_event_pipeline', mock.MagicMock())
     def test_process_notification_with_events(self):
-        self.CONF.set_override("store_events", True, group="notification")
         self._do_process_notification_manager_start()
         self.assertEqual(2, len(self.srv.listeners[0].dispatcher.endpoints))
         self.assertEqual(self.fake_event_endpoint,
                          self.srv.listeners[0].dispatcher.endpoints[0])
 
     @mock.patch('ceilometer.pipeline.setup_pipeline', mock.MagicMock())
+    @mock.patch('ceilometer.pipeline.setup_event_pipeline', mock.MagicMock())
     @mock.patch('oslo_messaging.get_batch_notification_listener')
     def test_unique_consumers(self, mock_listener):
 
         def fake_get_notifications_manager_dup_targets(pm):
-            plugin = instance.Instance(pm)
+            plugin = _FakeNotificationPlugin(pm)
             return extension.ExtensionManager.make_test_instance(
                 [extension.Extension('test', None, None, plugin),
                  extension.Extension('test', None, None, plugin)])
@@ -166,10 +170,8 @@ class TestNotification(tests_base.BaseTestCase):
             get_nm.side_effect = fake_get_notifications_manager_dup_targets
             self.srv.run()
             self.addCleanup(self.srv.terminate)
-            self.assertEqual(1, len(mock_listener.call_args_list))
+            self.assertEqual(2, len(mock_listener.call_args_list))
             args, kwargs = mock_listener.call_args
-            self.assertEqual(1, len(args[1]))
-            self.assertIsInstance(args[1][0], oslo_messaging.Target)
             self.assertEqual(1, len(self.srv.listeners))
 
 
@@ -217,20 +219,13 @@ class BaseRealNotification(tests_base.BaseTestCase):
 
     def setUp(self):
         super(BaseRealNotification, self).setUp()
-        self.CONF = self.useFixture(fixture_config.Config()).conf
-        # Dummy config file to avoid looking for system config
-        self.CONF([], project='ceilometer', validate_default_values=True)
+        self.CONF = service.prepare_service([], [])
         self.setup_messaging(self.CONF, 'nova')
 
-        pipeline_cfg_file = self.setup_pipeline(['instance', 'memory'])
+        pipeline_cfg_file = self.setup_pipeline(['vcpus', 'memory'])
         self.CONF.set_override("pipeline_cfg_file", pipeline_cfg_file)
 
         self.expected_samples = 2
-
-        self.CONF.set_override("backend_url", None, group="coordination")
-        self.CONF.set_override("store_events", True, group="notification")
-        self.CONF.set_override("disable_non_metric_meters", False,
-                               group="notification")
 
         ev_pipeline_cfg_file = self.setup_event_pipeline(
             ['compute.instance.*'])
@@ -238,11 +233,8 @@ class BaseRealNotification(tests_base.BaseTestCase):
 
         self.CONF.set_override("event_pipeline_cfg_file",
                                ev_pipeline_cfg_file)
-        self.CONF.set_override(
-            "definitions_cfg_file",
-            self.path_get('etc/ceilometer/event_definitions.yaml'),
-            group='event')
-        self.publisher = test_publisher.TestPublisher("")
+
+        self.publisher = test_publisher.TestPublisher(self.CONF, "")
 
     def _check_notification_service(self):
         self.srv.run()
@@ -252,8 +244,8 @@ class BaseRealNotification(tests_base.BaseTestCase):
                                           "compute.vagrant-precise")
         notifier.info({}, 'compute.instance.create.end',
                       TEST_NOTICE_PAYLOAD)
-        start = timeutils.utcnow()
-        while timeutils.delta_seconds(start, timeutils.utcnow()) < 600:
+        start = time.time()
+        while time.time() - start < 60:
             if (len(self.publisher.samples) >= self.expected_samples and
                     len(self.publisher.events) >= self.expected_events):
                 break
@@ -264,70 +256,11 @@ class BaseRealNotification(tests_base.BaseTestCase):
         self.assertEqual(["9f9d01b9-4a58-4271-9e27-398b21ab20d1"], resources)
 
 
-class TestRealNotificationReloadablePipeline(BaseRealNotification):
-
-    def setUp(self):
-        super(TestRealNotificationReloadablePipeline, self).setUp()
-        self.CONF.set_override('refresh_pipeline_cfg', True)
-        self.CONF.set_override('refresh_event_pipeline_cfg', True)
-        self.CONF.set_override('pipeline_polling_interval', 1)
-        self.srv = notification.NotificationService(0)
-
-    @mock.patch('ceilometer.publisher.test.TestPublisher')
-    def test_notification_pipeline_poller(self, fake_publisher_cls):
-        fake_publisher_cls.return_value = self.publisher
-        self.srv.run()
-        self.addCleanup(self.srv.terminate)
-        self.assertIsNotNone(self.srv.refresh_pipeline_periodic)
-
-    def test_notification_reloaded_pipeline(self):
-        pipeline_cfg_file = self.setup_pipeline(['instance'])
-        self.CONF.set_override("pipeline_cfg_file", pipeline_cfg_file)
-
-        self.srv.run()
-        self.addCleanup(self.srv.terminate)
-
-        pipeline = self.srv.pipe_manager
-
-        # Modify the collection targets
-        updated_pipeline_cfg_file = self.setup_pipeline(['vcpus',
-                                                         'disk.root.size'])
-        # Move/rename the updated pipeline file to the original pipeline
-        # file path as recorded in oslo config
-        shutil.move(updated_pipeline_cfg_file, pipeline_cfg_file)
-        self.srv.refresh_pipeline()
-
-        self.assertNotEqual(pipeline, self.srv.pipe_manager)
-
-    def test_notification_reloaded_event_pipeline(self):
-        ev_pipeline_cfg_file = self.setup_event_pipeline(
-            ['compute.instance.create.start'])
-        self.CONF.set_override("event_pipeline_cfg_file", ev_pipeline_cfg_file)
-
-        self.CONF.set_override("store_events", True, group="notification")
-
-        self.srv.run()
-        self.addCleanup(self.srv.terminate)
-
-        pipeline = self.srv.event_pipe_manager
-
-        # Modify the collection targets
-        updated_ev_pipeline_cfg_file = self.setup_event_pipeline(
-            ['compute.instance.*'])
-
-        # Move/rename the updated pipeline file to the original pipeline
-        # file path as recorded in oslo config
-        shutil.move(updated_ev_pipeline_cfg_file, ev_pipeline_cfg_file)
-        self.srv.refresh_pipeline()
-
-        self.assertNotEqual(pipeline, self.srv.pipe_manager)
-
-
 class TestRealNotification(BaseRealNotification):
 
     def setUp(self):
         super(TestRealNotification, self).setUp()
-        self.srv = notification.NotificationService(0)
+        self.srv = notification.NotificationService(0, self.CONF)
 
     @mock.patch('ceilometer.publisher.test.TestPublisher')
     def test_notification_service(self, fake_publisher_cls):
@@ -343,21 +276,11 @@ class TestRealNotification(BaseRealNotification):
                                           'compute.vagrant-precise')
         notifier.error({}, 'compute.instance.error',
                        TEST_NOTICE_PAYLOAD)
-        start = timeutils.utcnow()
-        while timeutils.delta_seconds(start, timeutils.utcnow()) < 600:
+        start = time.time()
+        while time.time() - start < 60:
             if len(self.publisher.events) >= self.expected_events:
                 break
         self.assertEqual(self.expected_events, len(self.publisher.events))
-
-    @mock.patch('ceilometer.publisher.test.TestPublisher')
-    def test_notification_disable_non_metrics(self, fake_publisher_cls):
-        self.CONF.set_override("disable_non_metric_meters", True,
-                               group="notification")
-        # instance is a not a metric. we should only get back memory
-        self.expected_samples = 1
-        fake_publisher_cls.return_value = self.publisher
-        self._check_notification_service()
-        self.assertEqual('memory', self.publisher.samples[0].name)
 
 
 class TestRealNotificationHA(BaseRealNotification):
@@ -366,12 +289,26 @@ class TestRealNotificationHA(BaseRealNotification):
         super(TestRealNotificationHA, self).setUp()
         self.CONF.set_override('workload_partitioning', True,
                                group='notification')
-        self.srv = notification.NotificationService(0)
+        self.CONF.set_override("backend_url", "zake://", group="coordination")
+        self.srv = notification.NotificationService(0, self.CONF)
 
     @mock.patch('ceilometer.publisher.test.TestPublisher')
     def test_notification_service(self, fake_publisher_cls):
         fake_publisher_cls.return_value = self.publisher
         self._check_notification_service()
+
+    @mock.patch("ceilometer.utils.kill_listeners", mock.MagicMock())
+    @mock.patch.object(oslo_messaging.MessageHandlingServer, 'start')
+    def test_notification_threads(self, m_listener):
+        self.CONF.set_override('batch_size', 1, group='notification')
+        self.srv.run()
+        m_listener.assert_called_with(
+            override_pool_size=self.CONF.max_parallel_requests)
+        m_listener.reset_mock()
+        self.srv.terminate()
+        self.CONF.set_override('batch_size', 2, group='notification')
+        self.srv.run()
+        m_listener.assert_called_with(override_pool_size=1)
 
     @mock.patch('oslo_messaging.get_batch_notification_listener')
     def test_reset_listener_on_refresh(self, mock_listener):
@@ -384,37 +321,38 @@ class TestRealNotificationHA(BaseRealNotification):
         self.srv.run()
         self.addCleanup(self.srv.terminate)
 
-        def _check_listener_targets():
-            args, kwargs = mock_listener.call_args
-            self.assertEqual(20, len(args[1]))
-            self.assertIsInstance(args[1][0], oslo_messaging.Target)
-
-        _check_listener_targets()
-
         listener = self.srv.pipeline_listener
         self.srv._configure_pipeline_listener()
         self.assertIsNot(listener, self.srv.pipeline_listener)
 
-        _check_listener_targets()
-
     @mock.patch('oslo_messaging.get_batch_notification_listener')
     def test_retain_common_targets_on_refresh(self, mock_listener):
-        with mock.patch('ceilometer.coordination.PartitionCoordinator'
-                        '.extract_my_subset', return_value=[1, 2]):
-            self.srv.run()
-            self.addCleanup(self.srv.terminate)
+        maybe = {"maybe": 0}
+
+        def _once_over_five(item):
+            maybe["maybe"] += 1
+            return maybe["maybe"] % 5 == 0
+
+        hashring = mock.MagicMock()
+        hashring.belongs_to_self = _once_over_five
+        self.srv.partition_coordinator = pc = mock.MagicMock()
+        pc.join_partitioned_group.return_value = hashring
+        self.srv.run()
+        self.addCleanup(self.srv.terminate)
         listened_before = [target.topic for target in
                            mock_listener.call_args[0][1]]
         self.assertEqual(4, len(listened_before))
-        with mock.patch('ceilometer.coordination.PartitionCoordinator'
-                        '.extract_my_subset', return_value=[1, 3]):
-            self.srv._refresh_agent(None)
+        self.srv._refresh_agent(None)
         listened_after = [target.topic for target in
                           mock_listener.call_args[0][1]]
         self.assertEqual(4, len(listened_after))
         common = set(listened_before) & set(listened_after)
-        for topic in common:
-            self.assertTrue(topic.endswith('1'))
+        self.assertEqual(
+            {'ceilometer-pipe-test_pipeline:test_sink-4',
+             'ceilometer-pipe-event:test_event:test_sink-4',
+             'ceilometer-pipe-event:test_event:test_sink-9',
+             'ceilometer-pipe-test_pipeline:test_sink-9'},
+            common)
 
     @mock.patch('oslo_messaging.get_batch_notification_listener')
     def test_notify_to_relevant_endpoint(self, mock_listener):
@@ -431,8 +369,12 @@ class TestRealNotificationHA(BaseRealNotification):
             endpoints[pipe.name] = endpoint
 
         notifiers = []
-        notifiers.extend(self.srv.pipe_manager.transporters[0][2])
-        notifiers.extend(self.srv.event_pipe_manager.transporters[0][2])
+        pipe_manager = self.srv._get_pipe_manager(
+            self.srv.transport, self.srv.pipeline_manager)
+        notifiers.extend(pipe_manager.transporters[0][2])
+        event_pipe_manager = self.srv._get_event_pipeline_manager(
+            self.srv.transport)
+        notifiers.extend(event_pipe_manager.transporters[0][2])
         for notifier in notifiers:
             filter_rule = endpoints[notifier.publisher_id].filter_rule
             self.assertEqual(True, filter_rule.match(None,
@@ -484,7 +426,7 @@ class TestRealNotificationMultipleAgents(tests_base.BaseTestCase):
             'sources': [{
                 'name': 'test_pipeline',
                 'interval': 5,
-                'meters': ['instance', 'memory'],
+                'meters': ['vcpus', 'memory'],
                 'sinks': ['test_sink']
             }],
             'sinks': [{
@@ -501,38 +443,64 @@ class TestRealNotificationMultipleAgents(tests_base.BaseTestCase):
                                                         suffix="yaml")
         return pipeline_cfg_file
 
+    def setup_event_pipeline(self):
+        pipeline = yaml.dump({
+            'sources': [],
+            'sinks': []
+        })
+        if six.PY3:
+            pipeline = pipeline.encode('utf-8')
+
+        pipeline_cfg_file = fileutils.write_to_tempfile(
+            content=pipeline, prefix="event_pipeline", suffix="yaml")
+        return pipeline_cfg_file
+
     def setUp(self):
         super(TestRealNotificationMultipleAgents, self).setUp()
-        self.CONF = self.useFixture(fixture_config.Config()).conf
-        self.CONF([], project='ceilometer', validate_default_values=True)
+        self.CONF = service.prepare_service([], [])
         self.setup_messaging(self.CONF, 'nova')
 
         pipeline_cfg_file = self.setup_pipeline(['instance', 'memory'])
+        event_pipeline_cfg_file = self.setup_event_pipeline()
         self.CONF.set_override("pipeline_cfg_file", pipeline_cfg_file)
-        self.CONF.set_override("backend_url", None, group="coordination")
-        self.CONF.set_override("store_events", False, group="notification")
-        self.CONF.set_override("disable_non_metric_meters", False,
-                               group="notification")
+        self.CONF.set_override("event_pipeline_cfg_file",
+                               event_pipeline_cfg_file)
+        self.CONF.set_override("backend_url", "zake://", group="coordination")
         self.CONF.set_override('workload_partitioning', True,
                                group='notification')
         self.CONF.set_override('pipeline_processing_queues', 2,
                                group='notification')
-        self.publisher = test_publisher.TestPublisher("")
-        self.publisher2 = test_publisher.TestPublisher("")
+        self.publisher = test_publisher.TestPublisher(self.CONF, "")
+        self.publisher2 = test_publisher.TestPublisher(self.CONF, "")
 
     def _check_notifications(self, fake_publisher_cls):
         fake_publisher_cls.side_effect = [self.publisher, self.publisher2]
 
-        self.srv = notification.NotificationService(0)
-        self.srv2 = notification.NotificationService(0)
-        with mock.patch('ceilometer.coordination.PartitionCoordinator'
-                        '._get_members', return_value=['harry', 'lloyd']):
-            with mock.patch('uuid.uuid4', return_value='harry'):
-                self.srv.run()
-            self.addCleanup(self.srv.terminate)
-            with mock.patch('uuid.uuid4', return_value='lloyd'):
-                self.srv2.run()
-            self.addCleanup(self.srv2.terminate)
+        maybe = {"srv": 0, "srv2": -1}
+
+        def _sometimes_srv(item):
+            maybe["srv"] += 1
+            return (maybe["srv"] % 2) == 0
+
+        self.srv = notification.NotificationService(0, self.CONF)
+        self.srv.partition_coordinator = pc = mock.MagicMock()
+        hashring = mock.MagicMock()
+        hashring.belongs_to_self = _sometimes_srv
+        pc.join_partitioned_group.return_value = hashring
+        self.srv.run()
+        self.addCleanup(self.srv.terminate)
+
+        def _sometimes_srv2(item):
+            maybe["srv2"] += 1
+            return (maybe["srv2"] % 2) == 0
+
+        self.srv2 = notification.NotificationService(0, self.CONF)
+        self.srv2.partition_coordinator = pc = mock.MagicMock()
+        hashring = mock.MagicMock()
+        hashring.belongs_to_self = _sometimes_srv2
+        pc.join_partitioned_group.return_value = hashring
+        self.srv2.run()
+        self.addCleanup(self.srv2.terminate)
 
         notifier = messaging.get_notifier(self.transport,
                                           "compute.vagrant-precise")
@@ -543,12 +511,13 @@ class TestRealNotificationMultipleAgents(tests_base.BaseTestCase):
         payload2['instance_id'] = '1'
         notifier.info({}, 'compute.instance.create.end', payload2)
         self.expected_samples = 4
-        start = timeutils.utcnow()
         with mock.patch('six.moves.builtins.hash', lambda x: int(x)):
-            while timeutils.delta_seconds(start, timeutils.utcnow()) < 60:
+            start = time.time()
+            while time.time() - start < 10:
                 if (len(self.publisher.samples + self.publisher2.samples) >=
                         self.expected_samples):
                     break
+                time.sleep(0.1)
 
         self.assertEqual(2, len(self.publisher.samples))
         self.assertEqual(2, len(self.publisher2.samples))

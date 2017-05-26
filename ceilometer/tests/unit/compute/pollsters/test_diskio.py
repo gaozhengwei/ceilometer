@@ -15,36 +15,20 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 import mock
-from oslotest import mockpatch
 
 from ceilometer.agent import manager
 from ceilometer.compute.pollsters import disk
 from ceilometer.compute.virt import inspector as virt_inspector
-import ceilometer.tests.base as base
+from ceilometer.tests.unit.compute.pollsters import base
 
 
-class TestBaseDiskIO(base.BaseTestCase):
+class TestBaseDiskIO(base.TestPollsterBase):
 
     TYPE = 'cumulative'
 
     def setUp(self):
         super(TestBaseDiskIO, self).setUp()
-
-        self.inspector = mock.Mock()
         self.instance = self._get_fake_instances()
-        patch_virt = mockpatch.Patch(
-            'ceilometer.compute.virt.inspector.get_hypervisor_inspector',
-            new=mock.Mock(return_value=self.inspector))
-        self.useFixture(patch_virt)
-
-        # as we're having lazy hypervisor inspector singleton object in the
-        # base compute pollster class, that leads to the fact that we
-        # need to mock all this class property to avoid context sharing between
-        # the tests
-        patch_inspector = mockpatch.Patch(
-            'ceilometer.compute.pollsters.BaseComputePollster.inspector',
-            self.inspector)
-        self.useFixture(patch_inspector)
 
     @staticmethod
     def _get_fake_instances():
@@ -63,13 +47,13 @@ class TestBaseDiskIO(base.BaseTestCase):
 
     @mock.patch('ceilometer.pipeline.setup_pipeline', mock.MagicMock())
     def _check_get_samples(self, factory, name, expected_count=2):
-        pollster = factory()
+        pollster = factory(self.CONF)
 
-        mgr = manager.AgentManager()
+        mgr = manager.AgentManager(0, self.CONF)
         cache = {}
         samples = list(pollster.get_samples(mgr, cache, self.instance))
         self.assertIsNotEmpty(samples)
-        cache_key = getattr(pollster, self.CACHE_KEY)
+        cache_key = pollster.inspector_method
         self.assertIn(cache_key, cache)
         for instance in self.instance:
             self.assertIn(instance.id, cache[cache_key])
@@ -112,16 +96,15 @@ class TestBaseDiskIO(base.BaseTestCase):
 class TestDiskPollsters(TestBaseDiskIO):
 
     DISKS = [
-        (virt_inspector.Disk(device='vda1'),
-         virt_inspector.DiskStats(read_bytes=1, read_requests=2,
-                                  write_bytes=3, write_requests=4,
-                                  errors=-1)),
-        (virt_inspector.Disk(device='vda2'),
-         virt_inspector.DiskStats(read_bytes=2, read_requests=3,
-                                  write_bytes=5, write_requests=7,
-                                  errors=-1)),
+        virt_inspector.DiskStats(device='vda1',
+                                 read_bytes=1, read_requests=2,
+                                 write_bytes=3, write_requests=4,
+                                 errors=-1),
+        virt_inspector.DiskStats(device='vda2',
+                                 read_bytes=2, read_requests=3,
+                                 write_bytes=5, write_requests=7,
+                                 errors=-1),
     ]
-    CACHE_KEY = "CACHE_KEY_DISK"
 
     def setUp(self):
         super(TestDiskPollsters, self).setUp()
@@ -183,14 +166,10 @@ class TestDiskPollsters(TestBaseDiskIO):
 class TestDiskRatePollsters(TestBaseDiskIO):
 
     DISKS = [
-        (virt_inspector.Disk(device='disk1'),
-         virt_inspector.DiskRateStats(1024, 300, 5120, 700)),
-
-        (virt_inspector.Disk(device='disk2'),
-         virt_inspector.DiskRateStats(2048, 400, 6144, 800))
+        virt_inspector.DiskRateStats("disk1", 1024, 300, 5120, 700),
+        virt_inspector.DiskRateStats("disk2", 2048, 400, 6144, 800)
     ]
     TYPE = 'gauge'
-    CACHE_KEY = "CACHE_KEY_DISK_RATE"
 
     def setUp(self):
         super(TestDiskRatePollsters, self).setUp()
@@ -252,14 +231,10 @@ class TestDiskRatePollsters(TestBaseDiskIO):
 class TestDiskLatencyPollsters(TestBaseDiskIO):
 
     DISKS = [
-        (virt_inspector.Disk(device='disk1'),
-         virt_inspector.DiskLatencyStats(1000)),
-
-        (virt_inspector.Disk(device='disk2'),
-         virt_inspector.DiskLatencyStats(2000))
+        virt_inspector.DiskLatencyStats("disk1", 1),
+        virt_inspector.DiskLatencyStats("disk2", 2)
     ]
     TYPE = 'gauge'
-    CACHE_KEY = "CACHE_KEY_DISK_LATENCY"
 
     def setUp(self):
         super(TestDiskLatencyPollsters, self).setUp()
@@ -281,14 +256,10 @@ class TestDiskLatencyPollsters(TestBaseDiskIO):
 class TestDiskIOPSPollsters(TestBaseDiskIO):
 
     DISKS = [
-        (virt_inspector.Disk(device='disk1'),
-         virt_inspector.DiskIOPSStats(10)),
-
-        (virt_inspector.Disk(device='disk2'),
-         virt_inspector.DiskIOPSStats(20)),
+        virt_inspector.DiskIOPSStats("disk1", 10),
+        virt_inspector.DiskIOPSStats("disk2", 20),
     ]
     TYPE = 'gauge'
-    CACHE_KEY = "CACHE_KEY_DISK_IOPS"
 
     def setUp(self):
         super(TestDiskIOPSPollsters, self).setUp()
@@ -309,13 +280,12 @@ class TestDiskIOPSPollsters(TestBaseDiskIO):
 class TestDiskInfoPollsters(TestBaseDiskIO):
 
     DISKS = [
-        (virt_inspector.Disk(device='vda1'),
-         virt_inspector.DiskInfo(capacity=3, allocation=2, physical=1)),
-        (virt_inspector.Disk(device='vda2'),
-         virt_inspector.DiskInfo(capacity=4, allocation=3, physical=2)),
+        virt_inspector.DiskInfo(device="vda1", capacity=3,
+                                allocation=2, physical=1),
+        virt_inspector.DiskInfo(device="vda2", capacity=4,
+                                allocation=3, physical=2),
     ]
     TYPE = 'gauge'
-    CACHE_KEY = "CACHE_KEY_DISK_INFO"
 
     def setUp(self):
         super(TestDiskInfoPollsters, self).setUp()

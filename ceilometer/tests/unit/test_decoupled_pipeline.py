@@ -17,15 +17,13 @@ import yaml
 
 from ceilometer import pipeline
 from ceilometer import sample
-from ceilometer.tests import pipeline_base
+from ceilometer.tests.unit import pipeline_base
 
 
 class TestDecoupledPipeline(pipeline_base.BasePipelineTestCase):
     def _setup_pipeline_cfg(self):
         source = {'name': 'test_source',
-                  'interval': 5,
-                  'counters': ['a'],
-                  'resources': [],
+                  'meters': ['a'],
                   'sinks': ['test_sink']}
         sink = {'name': 'test_sink',
                 'transformers': [{'name': 'update', 'parameters': {}}],
@@ -35,9 +33,7 @@ class TestDecoupledPipeline(pipeline_base.BasePipelineTestCase):
     def _augment_pipeline_cfg(self):
         self.pipeline_cfg['sources'].append({
             'name': 'second_source',
-            'interval': 5,
-            'counters': ['b'],
-            'resources': [],
+            'meters': ['b'],
             'sinks': ['second_sink']
         })
         self.pipeline_cfg['sinks'].append({
@@ -55,9 +51,7 @@ class TestDecoupledPipeline(pipeline_base.BasePipelineTestCase):
     def _break_pipeline_cfg(self):
         self.pipeline_cfg['sources'].append({
             'name': 'second_source',
-            'interval': 5,
-            'counters': ['b'],
-            'resources': [],
+            'meters': ['b'],
             'sinks': ['second_sink']
         })
         self.pipeline_cfg['sinks'].append({
@@ -75,9 +69,7 @@ class TestDecoupledPipeline(pipeline_base.BasePipelineTestCase):
     def _dup_pipeline_name_cfg(self):
         self.pipeline_cfg['sources'].append({
             'name': 'test_source',
-            'interval': 5,
-            'counters': ['b'],
-            'resources': [],
+            'meters': ['b'],
             'sinks': ['test_sink']
         })
 
@@ -103,16 +95,10 @@ class TestDecoupledPipeline(pipeline_base.BasePipelineTestCase):
         del self.pipeline_cfg['sinks']
         self._exception_create_pipelinemanager()
 
-    def test_source_no_meters_or_counters(self):
-        del self.pipeline_cfg['sources'][0]['counters']
-        self._exception_create_pipelinemanager()
-
     def test_source_dangling_sink(self):
         self.pipeline_cfg['sources'].append({
             'name': 'second_source',
-            'interval': 5,
-            'counters': ['b'],
-            'resources': [],
+            'meters': ['b'],
             'sinks': ['second_sink']
         })
         self._exception_create_pipelinemanager()
@@ -122,8 +108,8 @@ class TestDecoupledPipeline(pipeline_base.BasePipelineTestCase):
         self._exception_create_pipelinemanager()
 
     def test_source_with_multiple_sinks(self):
-        counter_cfg = ['a', 'b']
-        self._set_pipeline_cfg('counters', counter_cfg)
+        meter_cfg = ['a', 'b']
+        self._set_pipeline_cfg('meters', meter_cfg)
         self.pipeline_cfg['sinks'].append({
             'name': 'second_sink',
             'transformers': [{
@@ -136,9 +122,9 @@ class TestDecoupledPipeline(pipeline_base.BasePipelineTestCase):
             'publishers': ['new'],
         })
         self.pipeline_cfg['sources'][0]['sinks'].append('second_sink')
-
-        pipeline_manager = pipeline.PipelineManager(self.pipeline_cfg,
-                                                    self.transformer_manager)
+        pipeline_manager = pipeline.PipelineManager(
+            self.CONF,
+            self.cfg2file(self.pipeline_cfg), self.transformer_manager)
         with pipeline_manager.publisher() as p:
             p([self.test_counter])
 
@@ -174,14 +160,12 @@ class TestDecoupledPipeline(pipeline_base.BasePipelineTestCase):
     def test_multiple_sources_with_single_sink(self):
         self.pipeline_cfg['sources'].append({
             'name': 'second_source',
-            'interval': 5,
-            'counters': ['b'],
-            'resources': [],
+            'meters': ['b'],
             'sinks': ['test_sink']
         })
-
-        pipeline_manager = pipeline.PipelineManager(self.pipeline_cfg,
-                                                    self.transformer_manager)
+        pipeline_manager = pipeline.PipelineManager(
+            self.CONF,
+            self.cfg2file(self.pipeline_cfg), self.transformer_manager)
         with pipeline_manager.publisher() as p:
             p([self.test_counter])
 
@@ -220,13 +204,14 @@ class TestDecoupledPipeline(pipeline_base.BasePipelineTestCase):
 
     def _do_test_rate_of_change_in_boilerplate_pipeline_cfg(self, index,
                                                             meters, units):
-        with open('etc/ceilometer/pipeline.yaml') as fap:
+        with open('ceilometer/pipeline/data/pipeline.yaml') as fap:
             data = fap.read()
         pipeline_cfg = yaml.safe_load(data)
         for s in pipeline_cfg['sinks']:
             s['publishers'] = ['test://']
-        pipeline_manager = pipeline.PipelineManager(pipeline_cfg,
-                                                    self.transformer_manager)
+        pipeline_manager = pipeline.PipelineManager(
+            self.CONF,
+            self.cfg2file(pipeline_cfg), self.transformer_manager)
         pipe = pipeline_manager.pipelines[index]
         self._do_test_rate_of_change_mapping(pipe, meters, units)
 
@@ -279,18 +264,18 @@ class TestDecoupledPipeline(pipeline_base.BasePipelineTestCase):
         })
         self.assertRaises(pipeline.PipelineException,
                           pipeline.PipelineManager,
-                          self.pipeline_cfg,
+                          self.CONF,
+                          self.cfg2file(self.pipeline_cfg),
                           self.transformer_manager)
 
     def test_duplicated_source_names(self):
         self.pipeline_cfg['sources'].append({
             'name': 'test_source',
-            'interval': 5,
-            'counters': ['a'],
-            'resources': [],
+            'meters': ['a'],
             'sinks': ['test_sink']
         })
         self.assertRaises(pipeline.PipelineException,
                           pipeline.PipelineManager,
-                          self.pipeline_cfg,
+                          self.CONF,
+                          self.cfg2file(self.pipeline_cfg),
                           self.transformer_manager)

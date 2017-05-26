@@ -14,12 +14,11 @@
 import os
 
 from jsonpath_rw_ext import parser
-from oslo_config import cfg
 from oslo_log import log
 import six
 import yaml
 
-from ceilometer.i18n import _, _LI
+from ceilometer.i18n import _
 
 LOG = log.getLogger(__name__)
 
@@ -146,13 +145,13 @@ class Definition(object):
             return getter
 
 
-def load_definitions(defaults, config_file, fallback_file=None):
+def load_definitions(conf, defaults, config_file, fallback_file=None):
     """Setup a definitions from yaml config file."""
 
     if not os.path.exists(config_file):
-        config_file = cfg.CONF.find_file(config_file)
+        config_file = conf.find_file(config_file)
     if not config_file and fallback_file is not None:
-        LOG.debug("No Definitions configuration file found!"
+        LOG.debug("No Definitions configuration file found! "
                   "Using default config.")
         config_file = fallback_file
 
@@ -180,9 +179,9 @@ def load_definitions(defaults, config_file, fallback_file=None):
             raise
 
     else:
-        LOG.debug("No Definitions configuration file found!"
+        LOG.debug("No Definitions configuration file found! "
                   "Using default config.")
         definition_cfg = defaults
 
-    LOG.info(_LI("Definitions: %s"), definition_cfg)
+    LOG.info("Definitions: %s", definition_cfg)
     return definition_cfg

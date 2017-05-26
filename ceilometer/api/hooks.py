@@ -13,20 +13,16 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-from oslo_config import cfg
 from oslo_log import log
 import oslo_messaging
+from oslo_policy import policy
 
 from pecan import hooks
 
-from ceilometer.i18n import _LE
 from ceilometer import messaging
 from ceilometer import storage
 
 LOG = log.getLogger(__name__)
-
-cfg.CONF.import_opt('telemetry_driver', 'ceilometer.publisher.messaging',
-                    group='publisher_notifier')
 
 
 class ConfigHook(hooks.PecanHook):
@@ -34,36 +30,36 @@ class ConfigHook(hooks.PecanHook):
 
     That allows controllers to get it.
     """
+    def __init__(self, conf):
+        super(ConfigHook, self).__init__()
+        self.conf = conf
+        self.enforcer = policy.Enforcer(conf)
+        self.enforcer.load_rules()
 
-    @staticmethod
-    def before(state):
-        state.request.cfg = cfg.CONF
+    def on_route(self, state):
+        state.request.cfg = self.conf
+        state.request.enforcer = self.enforcer
 
 
 class DBHook(hooks.PecanHook):
 
-    def __init__(self):
-        self.storage_connection = DBHook.get_connection('metering')
-        self.event_storage_connection = DBHook.get_connection('event')
+    def __init__(self, conf):
+        self.storage_connection = self.get_connection(conf)
 
-        if (not self.storage_connection
-           and not self.event_storage_connection):
-            raise Exception("Api failed to start. Failed to connect to "
-                            "databases, purpose:  %s" %
-                            ', '.join(['metering', 'event']))
+        if not self.storage_connection:
+            raise Exception(
+                "API failed to start. Failed to connect to database")
 
     def before(self, state):
         state.request.storage_conn = self.storage_connection
-        state.request.event_storage_conn = self.event_storage_connection
 
     @staticmethod
-    def get_connection(purpose):
+    def get_connection(conf):
         try:
-            return storage.get_connection_from_config(cfg.CONF, purpose)
+            return storage.get_connection_from_config(conf)
         except Exception as err:
-            params = {"purpose": purpose, "err": err}
-            LOG.exception(_LE("Failed to connect to db, purpose %(purpose)s "
-                              "retry later: %(err)s") % params)
+            LOG.exception("Failed to connect to db" "retry later: %s",
+                          err)
 
 
 class NotifierHook(hooks.PecanHook):
@@ -73,10 +69,10 @@ class NotifierHook(hooks.PecanHook):
     are posted via /v2/meters/ API.
     """
 
-    def __init__(self):
-        transport = messaging.get_transport()
+    def __init__(self, conf):
+        transport = messaging.get_transport(conf)
         self.notifier = oslo_messaging.Notifier(
-            transport, driver=cfg.CONF.publisher_notifier.telemetry_driver,
+            transport, driver=conf.publisher_notifier.telemetry_driver,
             publisher_id="ceilometer.api")
 
     def before(self, state):

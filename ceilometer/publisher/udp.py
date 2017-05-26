@@ -18,7 +18,6 @@
 import socket
 
 import msgpack
-from oslo_config import cfg
 from oslo_log import log
 from oslo_utils import netutils
 
@@ -27,20 +26,31 @@ from ceilometer.i18n import _
 from ceilometer import publisher
 from ceilometer.publisher import utils
 
-cfg.CONF.import_opt('udp_port', 'ceilometer.collector',
-                    group='collector')
-
 LOG = log.getLogger(__name__)
 
 
-class UDPPublisher(publisher.PublisherBase):
-    def __init__(self, parsed_url):
+class UDPPublisher(publisher.ConfigPublisherBase):
+    def __init__(self, conf, parsed_url):
+        super(UDPPublisher, self).__init__(conf, parsed_url)
         self.host, self.port = netutils.parse_host_port(
             parsed_url.netloc,
-            default_port=cfg.CONF.collector.udp_port)
-        if netutils.is_valid_ipv6(self.host):
-            addr_family = socket.AF_INET6
+            default_port=self.conf.collector.udp_port)
+        addrinfo = None
+        try:
+            addrinfo = socket.getaddrinfo(self.host, None, socket.AF_INET6,
+                                          socket.SOCK_DGRAM)[0]
+        except socket.gaierror:
+            try:
+                addrinfo = socket.getaddrinfo(self.host, None, socket.AF_INET,
+                                              socket.SOCK_DGRAM)[0]
+            except socket.gaierror:
+                pass
+        if addrinfo:
+            addr_family = addrinfo[0]
         else:
+            LOG.warning(
+                "Cannot resolve host %s, creating AF_INET socket...",
+                self.host)
             addr_family = socket.AF_INET
         self.socket = socket.socket(addr_family,
                                     socket.SOCK_DGRAM)
@@ -53,7 +63,7 @@ class UDPPublisher(publisher.PublisherBase):
 
         for sample in samples:
             msg = utils.meter_message_from_counter(
-                sample, cfg.CONF.publisher.telemetry_secret)
+                sample, self.conf.publisher.telemetry_secret)
             host = self.host
             port = self.port
             LOG.debug("Publishing sample %(msg)s over UDP to "

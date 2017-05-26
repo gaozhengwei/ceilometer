@@ -14,6 +14,7 @@
 # under the License.
 
 from itertools import chain
+import select
 import socket
 
 import cotyledon
@@ -25,16 +26,16 @@ from oslo_utils import netutils
 from oslo_utils import units
 
 from ceilometer import dispatcher
-from ceilometer.i18n import _, _LE, _LW
+from ceilometer.i18n import _
 from ceilometer import messaging
 from ceilometer.publisher import utils as publisher_utils
 from ceilometer import utils
 
 OPTS = [
-    cfg.StrOpt('udp_address',
-               default='0.0.0.0',
-               help='Address to which the UDP socket is bound. Set to '
-               'an empty string to disable.'),
+    cfg.HostAddressOpt('udp_address',
+                       default='0.0.0.0',
+                       help='Address to which the UDP socket is bound. Set to '
+                       'an empty string to disable.'),
     cfg.PortOpt('udp_port',
                 default=4952,
                 help='Port to which the UDP socket is bound.'),
@@ -43,76 +44,91 @@ OPTS = [
                help='Number of notification messages to wait before '
                'dispatching them'),
     cfg.IntOpt('batch_timeout',
-               help='Number of seconds to wait before dispatching samples'
+               help='Number of seconds to wait before dispatching samples '
                'when batch_size is not reached (None means indefinitely)'),
+    cfg.IntOpt('workers',
+               default=1,
+               min=1,
+               deprecated_group='DEFAULT',
+               deprecated_name='collector_workers',
+               help='Number of workers for collector service. '
+               'default value is 1.')
 ]
-
-cfg.CONF.register_opts(OPTS, group="collector")
-cfg.CONF.import_opt('metering_topic', 'ceilometer.publisher.messaging',
-                    group='publisher_notifier')
-cfg.CONF.import_opt('event_topic', 'ceilometer.publisher.messaging',
-                    group='publisher_notifier')
-cfg.CONF.import_opt('store_events', 'ceilometer.notification',
-                    group='notification')
-
 
 LOG = log.getLogger(__name__)
 
 
 class CollectorService(cotyledon.Service):
     """Listener for the collector service."""
-    def run(self):
-        """Bind the UDP socket and handle incoming data."""
-        super(CollectorService, self).run()
+    def __init__(self, worker_id, conf):
+        super(CollectorService, self).__init__(worker_id)
+        self.conf = conf
         # ensure dispatcher is configured before starting other services
-        dispatcher_managers = dispatcher.load_dispatcher_manager()
+        dispatcher_managers = dispatcher.load_dispatcher_manager(conf)
         (self.meter_manager, self.event_manager) = dispatcher_managers
         self.sample_listener = None
         self.event_listener = None
         self.udp_thread = None
 
-        if cfg.CONF.collector.udp_address:
+        import debtcollector
+        debtcollector.deprecate("Ceilometer collector service is deprecated."
+                                "Use publishers to push data instead",
+                                version="9.0", removal_version="10.0")
+
+    def run(self):
+        if self.conf.collector.udp_address:
             self.udp_thread = utils.spawn_thread(self.start_udp)
 
-        transport = messaging.get_transport(optional=True)
+        transport = messaging.get_transport(self.conf, optional=True)
         if transport:
             if list(self.meter_manager):
                 sample_target = oslo_messaging.Target(
-                    topic=cfg.CONF.publisher_notifier.metering_topic)
+                    topic=self.conf.publisher_notifier.metering_topic)
                 self.sample_listener = (
                     messaging.get_batch_notification_listener(
                         transport, [sample_target],
-                        [SampleEndpoint(cfg.CONF.publisher.telemetry_secret,
+                        [SampleEndpoint(self.conf.publisher.telemetry_secret,
                                         self.meter_manager)],
                         allow_requeue=True,
-                        batch_size=cfg.CONF.collector.batch_size,
-                        batch_timeout=cfg.CONF.collector.batch_timeout))
+                        batch_size=self.conf.collector.batch_size,
+                        batch_timeout=self.conf.collector.batch_timeout))
                 self.sample_listener.start()
 
-            if cfg.CONF.notification.store_events and list(self.event_manager):
+            if list(self.event_manager):
                 event_target = oslo_messaging.Target(
-                    topic=cfg.CONF.publisher_notifier.event_topic)
+                    topic=self.conf.publisher_notifier.event_topic)
                 self.event_listener = (
                     messaging.get_batch_notification_listener(
                         transport, [event_target],
-                        [EventEndpoint(cfg.CONF.publisher.telemetry_secret,
+                        [EventEndpoint(self.conf.publisher.telemetry_secret,
                                        self.event_manager)],
                         allow_requeue=True,
-                        batch_size=cfg.CONF.collector.batch_size,
-                        batch_timeout=cfg.CONF.collector.batch_timeout))
+                        batch_size=self.conf.collector.batch_size,
+                        batch_timeout=self.conf.collector.batch_timeout))
                 self.event_listener.start()
 
     def start_udp(self):
         address_family = socket.AF_INET
-        if netutils.is_valid_ipv6(cfg.CONF.collector.udp_address):
+        if netutils.is_valid_ipv6(self.conf.collector.udp_address):
             address_family = socket.AF_INET6
         udp = socket.socket(address_family, socket.SOCK_DGRAM)
         udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        udp.bind((cfg.CONF.collector.udp_address,
-                  cfg.CONF.collector.udp_port))
+        try:
+            # NOTE(zhengwei): linux kernel >= 3.9
+            udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except Exception:
+            LOG.warning("System does not support socket.SO_REUSEPORT "
+                        "option. Only one worker will be able to process "
+                        "incoming data.")
+        udp.bind((self.conf.collector.udp_address,
+                  self.conf.collector.udp_port))
 
         self.udp_run = True
         while self.udp_run:
+            # NOTE(sileht): return every 10 seconds to allow
+            # clear shutdown
+            if not select.select([udp], [], [], 10.0)[0]:
+                continue
             # NOTE(jd) Arbitrary limit of 64K because that ought to be
             # enough for anybody.
             data, source = udp.recvfrom(64 * units.Ki)
@@ -122,7 +138,7 @@ class CollectorService(cotyledon.Service):
                 LOG.warning(_("UDP: Cannot decode data sent by %s"), source)
             else:
                 if publisher_utils.verify_signature(
-                        sample, cfg.CONF.publisher.telemetry_secret):
+                        sample, self.conf.publisher.telemetry_secret):
                     try:
                         LOG.debug("UDP: Storing %s", sample)
                         self.meter_manager.map_method(
@@ -130,8 +146,8 @@ class CollectorService(cotyledon.Service):
                     except Exception:
                         LOG.exception(_("UDP: Unable to store meter"))
                 else:
-                    LOG.warning(_LW('sample signature invalid, '
-                                    'discarding: %s'), sample)
+                    LOG.warning('sample signature invalid, '
+                                'discarding: %s', sample)
 
     def terminate(self):
         if self.sample_listener:
@@ -160,13 +176,13 @@ class CollectorEndpoint(object):
             if publisher_utils.verify_signature(sample, self.secret):
                 goods.append(sample)
             else:
-                LOG.warning(_LW('notification signature invalid, '
-                                'discarding: %s'), sample)
+                LOG.warning('notification signature invalid, '
+                            'discarding: %s', sample)
         try:
             self.dispatcher_manager.map_method(self.method, goods)
         except Exception:
-            LOG.exception(_LE("Dispatcher failed to handle the notification, "
-                              "re-queuing it."))
+            LOG.exception("Dispatcher failed to handle the notification, "
+                          "re-queuing it.")
             return oslo_messaging.NotificationResult.REQUEUE
 
 

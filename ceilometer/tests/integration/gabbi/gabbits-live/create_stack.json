@@ -12,8 +12,8 @@
                     "resource": {
                         "type": "OS::Nova::Server",
                         "properties": {
-                            "networks": [{ "network": "private" }],
-                            "flavor": "m1.tiny",
+                            "networks": [{ "network": "$ENVIRON['NEUTRON_NETWORK']" }],
+                            "flavor": "$ENVIRON['NOVA_FLAVOR_REF']",
                             "image": "$ENVIRON['GLANCE_IMAGE_NAME']",
                             "metadata": {
                                 "metering.server_group": { "get_param": "OS::stack_id" }
@@ -44,7 +44,7 @@
                     "description": "Scale-up if the mean CPU > 10% on 1 minute",
                     "metric": "cpu_util",
                     "aggregation_method": "mean",
-                    "granularity": 60,
+                    "granularity": $ENVIRON["AODH_GRANULARITY"],
                     "evaluation_periods": 1,
                     "threshold": 10,
                     "comparison_operator": "gt",

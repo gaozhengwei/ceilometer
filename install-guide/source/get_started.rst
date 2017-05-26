@@ -16,8 +16,7 @@ The Telemetry service consists of the following components:
 
 A compute agent (``ceilometer-agent-compute``)
   Runs on each compute node and polls for resource utilization
-  statistics. There may be other types of agents in the future, but
-  for now our focus is creating the compute agent.
+  statistics.
 
 A central agent (``ceilometer-agent-central``)
   Runs on a central management server to poll for resource utilization
@@ -26,16 +25,18 @@ A central agent (``ceilometer-agent-central``)
 
 A notification agent (``ceilometer-agent-notification``)
   Runs on a central management server(s) and consumes messages from
-  the message queue(s) to build event and metering data.
+  the message queue(s) to build event and metering data. Data is then
+  published to defined targets. By default, data is pushed to Gnocchi_.
 
-A collector (``ceilometer-collector``)
-  Runs on central management server(s) and dispatches collected
-  telemetry data to a data store or external consumer without
-  modification.
+These services communicate by using the OpenStack messaging bus. Ceilometer
+data is designed to be published to various endpoints for storage and
+analysis.
 
-An API server (``ceilometer-api``)
-  Runs on one or more central management servers to provide data
-  access from the data store.
+.. note::
 
-These services communicate by using the OpenStack messaging bus. Only
-the collector and API server have access to the data store.
+   Ceilometer previously provided a storage and API solution. As of Newton,
+   this functionality is officially deprecated and discouraged. For efficient
+   storage and statistical analysis of Ceilometer data, Gnocchi_ is
+   recommended.
+
+.. _Gnocchi: http://gnocchi.xyz

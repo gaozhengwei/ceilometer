@@ -19,23 +19,21 @@ import logging.handlers
 from oslo_log import log
 from six.moves.urllib import parse as urlparse
 
-import ceilometer
-from ceilometer.i18n import _
 from ceilometer import publisher
 
 LOG = log.getLogger(__name__)
 
 
-class FilePublisher(publisher.PublisherBase):
+class FilePublisher(publisher.ConfigPublisherBase):
     """Publisher metering data to file.
 
-    The publisher which records metering data into a file. The file name and
+    The file publisher pushes metering data into a file. The file name and
     location should be configured in ceilometer pipeline configuration file.
     If a file name and location is not specified, this File Publisher will not
     log any meters other than log a warning in Ceilometer log file.
 
     To enable this publisher, add the following section to the
-    /etc/ceilometer/publisher.yaml file or simply add it to an existing
+    /etc/ceilometer/pipeline.yaml file or simply add it to an existing
     pipeline::
 
         -
@@ -53,13 +51,13 @@ class FilePublisher(publisher.PublisherBase):
     be used to save the metering data.
     """
 
-    def __init__(self, parsed_url):
-        super(FilePublisher, self).__init__(parsed_url)
+    def __init__(self, conf, parsed_url):
+        super(FilePublisher, self).__init__(conf, parsed_url)
 
         self.publisher_logger = None
         path = parsed_url.path
-        if not path or path.lower() == 'file':
-            LOG.error(_('The path for the file publisher is required'))
+        if not path:
+            LOG.error('The path for the file publisher is required')
             return
 
         rfh = None
@@ -73,8 +71,8 @@ class FilePublisher(publisher.PublisherBase):
                     max_bytes = int(params.get('max_bytes')[0])
                     backup_count = int(params.get('backup_count')[0])
                 except ValueError:
-                    LOG.error(_('max_bytes and backup_count should be '
-                              'numbers.'))
+                    LOG.error('max_bytes and backup_count should be '
+                              'numbers.')
                     return
         # create rotating file handler
         rfh = logging.handlers.RotatingFileHandler(
@@ -101,4 +99,6 @@ class FilePublisher(publisher.PublisherBase):
 
         :param events: events from pipeline after transformation
         """
-        raise ceilometer.NotImplementedError
+        if self.publisher_logger:
+            for event in events:
+                self.publisher_logger.info(event.as_dict())

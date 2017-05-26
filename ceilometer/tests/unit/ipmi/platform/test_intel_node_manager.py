@@ -20,6 +20,7 @@ from oslotest import base
 import six
 
 from ceilometer.ipmi.platform import intel_node_manager as node_manager
+from ceilometer import service
 from ceilometer.tests.unit.ipmi.platform import fake_utils
 from ceilometer import utils
 
@@ -33,14 +34,23 @@ class _Base(base.BaseTestCase):
 
     def setUp(self):
         super(_Base, self).setUp()
+        conf = service.prepare_service([], [])
         self.init_test_engine()
-        self.nm = node_manager.NodeManager()
+        with mock.patch.object(node_manager.NodeManager, '__new__',
+                               side_effect=self._new_no_singleton):
+            self.nm = node_manager.NodeManager(conf)
 
-    @classmethod
-    def tearDownClass(cls):
-        # reset inited to force an initialization of singleton for next test
-        node_manager.NodeManager()._inited = False
-        super(_Base, cls).tearDownClass()
+    @staticmethod
+    def _new_no_singleton(cls, *args, **kwargs):
+        if six.PY3:
+            # We call init manually due to a py3 bug:
+            # https://bugs.python.org/issue25731
+            obj = super(node_manager.NodeManager, cls).__new__(cls)
+            obj.__init__(*args, **kwargs)
+            return obj
+        else:
+            return super(node_manager.NodeManager, cls).__new__(
+                cls, *args, **kwargs)
 
 
 class TestNodeManagerV3(_Base):

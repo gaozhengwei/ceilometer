@@ -15,13 +15,18 @@
 
 from oslotest import base
 
+from ceilometer import service
+
 
 class _PollsterTestBase(base.BaseTestCase):
+    def setUp(self):
+        super(_PollsterTestBase, self).setUp()
+        self.CONF = service.prepare_service([], [])
 
     def _test_pollster(self, pollster_class, meter_name,
                        meter_type, meter_unit):
 
-        pollster = pollster_class()
+        pollster = pollster_class(self.CONF)
 
         self.assertEqual(pollster.meter_name, meter_name)
         self.assertEqual(pollster.meter_type, meter_type)

@@ -23,7 +23,6 @@ import datetime
 import functools
 import inspect
 
-from oslo_config import cfg
 from oslo_log import log
 from oslo_utils import timeutils
 import pecan
@@ -32,20 +31,18 @@ import wsme
 
 from ceilometer.api.controllers.v2 import base
 from ceilometer.api import rbac
-from ceilometer.i18n import _, _LI
+from ceilometer.i18n import _
 from ceilometer import utils
 
 LOG = log.getLogger(__name__)
-cfg.CONF.import_opt('default_api_return_limit', 'ceilometer.api.app',
-                    group='api')
 
 
 def enforce_limit(limit):
     """Ensure limit is defined and is valid. if not, set a default."""
     if limit is None:
-        limit = cfg.CONF.api.default_api_return_limit
-        LOG.info(_LI('No limit value provided, result set will be'
-                     ' limited to %(limit)d.'), {'limit': limit})
+        limit = pecan.request.cfg.api.default_api_return_limit
+        LOG.info('No limit value provided, result set will be'
+                 ' limited to %(limit)d.', {'limit': limit})
     if not limit or limit <= 0:
         raise base.ClientSideError(_("Limit must be positive"))
     return limit

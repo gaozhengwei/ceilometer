@@ -77,8 +77,8 @@ exception_conversion_map = collections.OrderedDict([
 @decorate_all_methods(convert_exceptions, exception_conversion_map)
 class HyperVInspector(virt_inspector.Inspector):
 
-    def __init__(self):
-        super(HyperVInspector, self).__init__()
+    def __init__(self, conf):
+        super(HyperVInspector, self).__init__(conf)
         self._utils = utilsfactory.get_metricsutils()
         self._host_max_cpu_clock = self._compute_host_max_cpu_clock()
 
@@ -91,45 +91,42 @@ class HyperVInspector(virt_inspector.Inspector):
 
         return float(host_cpu_clock * host_cpu_count)
 
-    def inspect_cpus(self, instance):
+    def inspect_instance(self, instance, duration):
         instance_name = util.instance_name(instance)
         (cpu_clock_used,
          cpu_count, uptime) = self._utils.get_cpu_metrics(instance_name)
-
         cpu_percent_used = cpu_clock_used / self._host_max_cpu_clock
-
         # Nanoseconds
         cpu_time = (int(uptime * cpu_percent_used) * units.k)
+        memory_usage = self._utils.get_memory_metrics(instance_name)
 
-        return virt_inspector.CPUStats(number=cpu_count, time=cpu_time)
+        return virt_inspector.InstanceStats(
+            cpu_number=cpu_count,
+            cpu_time=cpu_time,
+            memory_usage=memory_usage)
 
-    def inspect_memory_usage(self, instance, duration=None):
-        instance_name = util.instance_name(instance)
-        usage = self._utils.get_memory_metrics(instance_name)
-        return virt_inspector.MemoryUsageStats(usage=usage)
-
-    def inspect_vnics(self, instance):
+    def inspect_vnics(self, instance, duration):
         instance_name = util.instance_name(instance)
         for vnic_metrics in self._utils.get_vnic_metrics(instance_name):
-            interface = virt_inspector.Interface(
+            yield virt_inspector.InterfaceStats(
                 name=vnic_metrics["element_name"],
                 mac=vnic_metrics["address"],
                 fref=None,
-                parameters=None)
-
-            stats = virt_inspector.InterfaceStats(
+                parameters=None,
                 rx_bytes=vnic_metrics['rx_mb'] * units.Mi,
                 rx_packets=0,
+                rx_drop=0,
+                rx_errors=0,
                 tx_bytes=vnic_metrics['tx_mb'] * units.Mi,
-                tx_packets=0)
+                tx_packets=0,
+                tx_drop=0,
+                tx_errors=0)
 
-            yield (interface, stats)
-
-    def inspect_disks(self, instance):
+    def inspect_disks(self, instance, duration):
         instance_name = util.instance_name(instance)
         for disk_metrics in self._utils.get_disk_metrics(instance_name):
-            disk = virt_inspector.Disk(device=disk_metrics['instance_id'])
-            stats = virt_inspector.DiskStats(
+            yield virt_inspector.DiskStats(
+                device=disk_metrics['instance_id'],
                 read_requests=0,
                 # Return bytes
                 read_bytes=disk_metrics['read_mb'] * units.Mi,
@@ -137,23 +134,17 @@ class HyperVInspector(virt_inspector.Inspector):
                 write_bytes=disk_metrics['write_mb'] * units.Mi,
                 errors=0)
 
-            yield (disk, stats)
-
-    def inspect_disk_latency(self, instance):
+    def inspect_disk_latency(self, instance, duration):
         instance_name = util.instance_name(instance)
         for disk_metrics in self._utils.get_disk_latency_metrics(
                 instance_name):
-            disk = virt_inspector.Disk(device=disk_metrics['instance_id'])
-            stats = virt_inspector.DiskLatencyStats(
-                disk_latency=disk_metrics['disk_latency'])
+            yield virt_inspector.DiskLatencyStats(
+                device=disk_metrics['instance_id'],
+                disk_latency=disk_metrics['disk_latency'] / 1000)
 
-            yield (disk, stats)
-
-    def inspect_disk_iops(self, instance):
+    def inspect_disk_iops(self, instance, duration):
         instance_name = util.instance_name(instance)
         for disk_metrics in self._utils.get_disk_iops_count(instance_name):
-            disk = virt_inspector.Disk(device=disk_metrics['instance_id'])
-            stats = virt_inspector.DiskIOPSStats(
+            yield virt_inspector.DiskIOPSStats(
+                device=disk_metrics['instance_id'],
                 iops_count=disk_metrics['iops_count'])
-
-            yield (disk, stats)

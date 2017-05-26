@@ -25,7 +25,7 @@ from ceilometer.agent import plugin_base
 from ceilometer import declarative
 from ceilometer.hardware import inspector as insloader
 from ceilometer.hardware.pollsters import util
-from ceilometer.i18n import _LE, _LW
+from ceilometer.i18n import _
 from ceilometer import sample
 
 OPTS = [
@@ -34,8 +34,6 @@ OPTS = [
                help="Configuration file for defining hardware snmp meters."
                ),
 ]
-
-cfg.CONF.register_opts(OPTS, group='hardware')
 
 LOG = log.getLogger(__name__)
 
@@ -51,22 +49,22 @@ class MeterDefinition(object):
                  fname.endswith('_inspector'))):
                 setattr(self, fname, fval)
             else:
-                LOG.warning(_LW("Ignore unrecognized field %s"), fname)
+                LOG.warning("Ignore unrecognized field %s", fname)
         for fname in self.required_fields:
             if not getattr(self, fname, None):
                 raise declarative.MeterDefinitionException(
-                    _LE("Missing field %s") % fname, self.cfg)
+                    _("Missing field %s") % fname, self.cfg)
         if self.type not in sample.TYPES:
             raise declarative.MeterDefinitionException(
-                _LE("Unrecognized type value %s") % self.type, self.cfg)
+                _("Unrecognized type value %s") % self.type, self.cfg)
 
 
 class GenericHardwareDeclarativePollster(plugin_base.PollsterBase):
     CACHE_KEY = 'hardware.generic'
     mapping = None
 
-    def __init__(self):
-        super(GenericHardwareDeclarativePollster, self).__init__()
+    def __init__(self, conf):
+        super(GenericHardwareDeclarativePollster, self).__init__(conf)
         self.inspectors = {}
 
     def _update_meter_definition(self, definition):
@@ -93,8 +91,8 @@ class GenericHardwareDeclarativePollster(plugin_base.PollsterBase):
         parsed_url, resource_id, metadata = (None, None, None)
         if isinstance(res, dict):
             if 'resource_url' not in res or 'resource_id' not in res:
-                LOG.error(_LE('Passed resource dict must contain keys '
-                              'resource_id and resource_url.'))
+                LOG.error('Passed resource dict must contain keys '
+                          'resource_id and resource_url.')
             else:
                 metadata = res
                 parsed_url = netutils.urlsplit(res['resource_url'])
@@ -112,10 +110,10 @@ class GenericHardwareDeclarativePollster(plugin_base.PollsterBase):
                 driver = insloader.get_inspector(parsed_url)
                 self.inspectors[parsed_url.scheme] = driver
             except Exception as err:
-                LOG.exception(_LE("Cannot load inspector %(name)s: %(err)s"),
+                LOG.exception("Cannot load inspector %(name)s: %(err)s",
                               dict(name=parsed_url.scheme,
                                    err=err))
-                raise err
+                raise
         return self.inspectors[parsed_url.scheme]
 
     def get_samples(self, manager, cache, resources=None):
@@ -135,7 +133,7 @@ class GenericHardwareDeclarativePollster(plugin_base.PollsterBase):
         for resource in resources:
             parsed_url, res, extra_metadata = self._parse_resource(resource)
             if parsed_url is None:
-                LOG.error(_LE("Skip invalid resource %s"), resource)
+                LOG.error("Skip invalid resource %s", resource)
                 continue
             ins = self._get_inspector(parsed_url)
             try:
@@ -163,8 +161,8 @@ class GenericHardwareDeclarativePollster(plugin_base.PollsterBase):
                         parsed_url,
                         i_cache[identifier]))
             except Exception as err:
-                LOG.exception(_LE('inspector call failed for %(ident)s '
-                                  'host %(host)s: %(err)s'),
+                LOG.exception('inspector call failed for %(ident)s '
+                              'host %(host)s: %(err)s',
                               dict(ident=identifier,
                                    host=parsed_url.hostname,
                                    err=err))
@@ -191,16 +189,16 @@ class GenericHardwareDeclarativePollster(plugin_base.PollsterBase):
         return samples
 
     @classmethod
-    def build_pollsters(cls):
+    def build_pollsters(cls, conf):
         if not cls.mapping:
             definition_cfg = declarative.load_definitions(
-                {}, cfg.CONF.hardware.meter_definitions_file,
+                conf, {}, conf.hardware.meter_definitions_file,
                 pkg_resources.resource_filename(__name__, "data/snmp.yaml"))
             cls.mapping = load_definition(definition_cfg)
 
         pollsters = []
         for name in cls.mapping:
-            pollster = cls()
+            pollster = cls(conf)
             pollster._update_meter_definition(cls.mapping[name])
             pollsters.append((name, pollster))
         return pollsters
@@ -213,6 +211,6 @@ def load_definition(config_def):
             meter = MeterDefinition(meter_def)
             mappings[meter.name] = meter
         except declarative.DefinitionException as e:
-            errmsg = _LE("Error loading meter definition: %s")
+            errmsg = "Error loading meter definition: %s"
             LOG.error(errmsg, e.brief_message)
     return mappings

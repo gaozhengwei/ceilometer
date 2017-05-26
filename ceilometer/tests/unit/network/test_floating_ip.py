@@ -14,14 +14,15 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import fixtures
 import mock
 from oslotest import base
-from oslotest import mockpatch
 
 from ceilometer.agent import manager
 from ceilometer.agent import plugin_base
 from ceilometer.network import floatingip
 from ceilometer.network.services import discovery
+from ceilometer import service
 
 
 class _BaseTestFloatingIPPollster(base.BaseTestCase):
@@ -29,7 +30,8 @@ class _BaseTestFloatingIPPollster(base.BaseTestCase):
     @mock.patch('ceilometer.pipeline.setup_pipeline', mock.MagicMock())
     def setUp(self):
         super(_BaseTestFloatingIPPollster, self).setUp()
-        self.manager = manager.AgentManager()
+        self.CONF = service.prepare_service([], [])
+        self.manager = manager.AgentManager(0, self.CONF)
         plugin_base._get_keystone = mock.Mock()
 
 
@@ -37,11 +39,11 @@ class TestFloatingIPPollster(_BaseTestFloatingIPPollster):
 
     def setUp(self):
         super(TestFloatingIPPollster, self).setUp()
-        self.pollster = floatingip.FloatingIPPollster()
+        self.pollster = floatingip.FloatingIPPollster(self.CONF)
         fake_fip = self.fake_get_fip_service()
-        self.useFixture(mockpatch.Patch('ceilometer.neutron_client.Client.'
-                                        'fip_get_all',
-                                        return_value=fake_fip))
+        self.useFixture(fixtures.MockPatch('ceilometer.neutron_client.Client.'
+                                           'fip_get_all',
+                                           return_value=fake_fip))
 
     @staticmethod
     def fake_get_fip_service():
@@ -96,6 +98,6 @@ class TestFloatingIPPollster(_BaseTestFloatingIPPollster):
                          set([s.name for s in samples]))
 
     def test_fip_discovery(self):
-        discovered_fips = discovery.FloatingIPDiscovery().discover(
-            self.manager)
+        discovered_fips = discovery.FloatingIPDiscovery(
+            self.CONF).discover(self.manager)
         self.assertEqual(3, len(discovered_fips))

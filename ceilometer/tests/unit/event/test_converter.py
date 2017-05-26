@@ -17,7 +17,6 @@ import datetime
 
 import jsonpath_rw_ext
 import mock
-from oslo_config import fixture as fixture_config
 import six
 
 from ceilometer import declarative
@@ -53,9 +52,8 @@ class ConverterBase(base.BaseTestCase):
 
     def assertHasTrait(self, event, name, value=None, dtype=None):
         traits = [trait for trait in event.traits if trait.name == name]
-        self.assertTrue(
-            len(traits) > 0,
-            "Trait %s not found in event %s" % (name, event))
+        self.assertGreater(len(traits), 0,
+                           "Trait %s not found in event %s" % (name, event))
         trait = traits[0]
         if value is not None:
             self.assertEqual(value, trait.value)
@@ -165,7 +163,7 @@ class TestTraitDefinition(ConverterBase):
         tdef = converter.TraitDefinition('test_trait', cfg,
                                          self.fake_plugin_mgr)
         t = tdef.to_trait(self.n1)
-        self.assertIs(None, t)
+        self.assertIsNone(t)
         self.nothing_plugin_class.assert_called_once_with()
         self.nothing_plugin.trait_values.assert_called_once_with([
             ('payload.instance_id', 'id-for-instance-0001'),
@@ -264,21 +262,21 @@ class TestTraitDefinition(ConverterBase):
         tdef = converter.TraitDefinition('test_trait', cfg,
                                          self.fake_plugin_mgr)
         t = tdef.to_trait(self.n1)
-        self.assertIs(None, t)
+        self.assertIsNone(t)
 
     def test_to_trait_null(self):
         cfg = dict(type='text', fields='payload.instance_id2')
         tdef = converter.TraitDefinition('test_trait', cfg,
                                          self.fake_plugin_mgr)
         t = tdef.to_trait(self.n1)
-        self.assertIs(None, t)
+        self.assertIsNone(t)
 
     def test_to_trait_empty_nontext(self):
         cfg = dict(type='datetime', fields='payload.bogus_date')
         tdef = converter.TraitDefinition('test_trait', cfg,
                                          self.fake_plugin_mgr)
         t = tdef.to_trait(self.n1)
-        self.assertIs(None, t)
+        self.assertIsNone(t)
 
     def test_to_trait_multiple_null_missing(self):
         cfg = dict(type='text', fields=['payload.not_here_boss',
@@ -286,7 +284,7 @@ class TestTraitDefinition(ConverterBase):
         tdef = converter.TraitDefinition('test_trait', cfg,
                                          self.fake_plugin_mgr)
         t = tdef.to_trait(self.n1)
-        self.assertIs(None, t)
+        self.assertIsNone(t)
 
     def test_missing_fields_config(self):
         self.assertRaises(declarative.DefinitionException,
@@ -400,7 +398,7 @@ class TestEventDefinition(ConverterBase):
     def test_to_event(self):
         dtype = models.Trait.TEXT_TYPE
         cfg = dict(event_type='test.thing', traits=self.traits_cfg)
-        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr)
+        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr, [])
 
         e = edef.to_event(self.test_notification1)
         self.assertEqual('test.thing', e.event_type)
@@ -416,7 +414,7 @@ class TestEventDefinition(ConverterBase):
     def test_to_event_missing_trait(self):
         dtype = models.Trait.TEXT_TYPE
         cfg = dict(event_type='test.thing', traits=self.traits_cfg)
-        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr)
+        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr, [])
 
         e = edef.to_event(self.test_notification2)
 
@@ -429,7 +427,7 @@ class TestEventDefinition(ConverterBase):
     def test_to_event_null_trait(self):
         dtype = models.Trait.TEXT_TYPE
         cfg = dict(event_type='test.thing', traits=self.traits_cfg)
-        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr)
+        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr, [])
 
         e = edef.to_event(self.test_notification3)
 
@@ -444,18 +442,20 @@ class TestEventDefinition(ConverterBase):
         self.assertRaises(declarative.DefinitionException,
                           converter.EventDefinition,
                           bogus,
-                          self.fake_plugin_mgr)
+                          self.fake_plugin_mgr,
+                          [])
 
     def test_bogus_cfg_no_type(self):
         bogus = dict(traits=self.traits_cfg)
         self.assertRaises(declarative.DefinitionException,
                           converter.EventDefinition,
                           bogus,
-                          self.fake_plugin_mgr)
+                          self.fake_plugin_mgr,
+                          [])
 
     def test_included_type_string(self):
         cfg = dict(event_type='test.thing', traits=self.traits_cfg)
-        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr)
+        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr, [])
         self.assertEqual(1, len(edef._included_types))
         self.assertEqual('test.thing', edef._included_types[0])
         self.assertEqual(0, len(edef._excluded_types))
@@ -467,7 +467,7 @@ class TestEventDefinition(ConverterBase):
     def test_included_type_list(self):
         cfg = dict(event_type=['test.thing', 'other.thing'],
                    traits=self.traits_cfg)
-        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr)
+        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr, [])
         self.assertEqual(2, len(edef._included_types))
         self.assertEqual(0, len(edef._excluded_types))
         self.assertTrue(edef.included_type('test.thing'))
@@ -479,7 +479,7 @@ class TestEventDefinition(ConverterBase):
 
     def test_excluded_type_string(self):
         cfg = dict(event_type='!test.thing', traits=self.traits_cfg)
-        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr)
+        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr, [])
         self.assertEqual(1, len(edef._included_types))
         self.assertEqual('*', edef._included_types[0])
         self.assertEqual('test.thing', edef._excluded_types[0])
@@ -493,7 +493,7 @@ class TestEventDefinition(ConverterBase):
     def test_excluded_type_list(self):
         cfg = dict(event_type=['!test.thing', '!other.thing'],
                    traits=self.traits_cfg)
-        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr)
+        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr, [])
         self.assertEqual(1, len(edef._included_types))
         self.assertEqual(2, len(edef._excluded_types))
         self.assertTrue(edef.excluded_type('test.thing'))
@@ -506,7 +506,7 @@ class TestEventDefinition(ConverterBase):
     def test_mixed_type_list(self):
         cfg = dict(event_type=['*.thing', '!test.thing', '!other.thing'],
                    traits=self.traits_cfg)
-        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr)
+        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr, [])
         self.assertEqual(1, len(edef._included_types))
         self.assertEqual(2, len(edef._excluded_types))
         self.assertTrue(edef.excluded_type('test.thing'))
@@ -520,32 +520,32 @@ class TestEventDefinition(ConverterBase):
     def test_catchall(self):
         cfg = dict(event_type=['*.thing', '!test.thing', '!other.thing'],
                    traits=self.traits_cfg)
-        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr)
+        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr, [])
         self.assertFalse(edef.is_catchall)
 
         cfg = dict(event_type=['!other.thing'],
                    traits=self.traits_cfg)
-        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr)
+        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr, [])
         self.assertFalse(edef.is_catchall)
 
         cfg = dict(event_type=['other.thing'],
                    traits=self.traits_cfg)
-        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr)
+        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr, [])
         self.assertFalse(edef.is_catchall)
 
         cfg = dict(event_type=['*', '!other.thing'],
                    traits=self.traits_cfg)
-        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr)
+        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr, [])
         self.assertFalse(edef.is_catchall)
 
         cfg = dict(event_type=['*'],
                    traits=self.traits_cfg)
-        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr)
+        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr, [])
         self.assertTrue(edef.is_catchall)
 
         cfg = dict(event_type=['*', 'foo'],
                    traits=self.traits_cfg)
-        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr)
+        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr, [])
         self.assertTrue(edef.is_catchall)
 
     @mock.patch('oslo_utils.timeutils.utcnow')
@@ -572,7 +572,7 @@ class TestEventDefinition(ConverterBase):
 
     def test_default_traits(self):
         cfg = dict(event_type='test.thing', traits={})
-        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr)
+        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr, [])
         default_traits = converter.EventDefinition.DEFAULT_TRAITS.keys()
         traits = set(edef.traits.keys())
         for dt in default_traits:
@@ -582,7 +582,7 @@ class TestEventDefinition(ConverterBase):
 
     def test_traits(self):
         cfg = dict(event_type='test.thing', traits=self.traits_cfg)
-        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr)
+        edef = converter.EventDefinition(cfg, self.fake_plugin_mgr, [])
         default_traits = converter.EventDefinition.DEFAULT_TRAITS.keys()
         traits = set(edef.traits.keys())
         for dt in default_traits:
@@ -597,8 +597,7 @@ class TestNotificationConverter(ConverterBase):
 
     def setUp(self):
         super(TestNotificationConverter, self).setUp()
-        self.CONF = self.useFixture(fixture_config.Config()).conf
-        ceilometer_service.prepare_service(argv=[], config_files=[])
+        self.CONF = ceilometer_service.prepare_service([], [])
         self.valid_event_def1 = [{
             'event_type': 'compute.instance.create.*',
             'traits': {
@@ -628,13 +627,13 @@ class TestNotificationConverter(ConverterBase):
 
     @mock.patch('oslo_utils.timeutils.utcnow')
     def test_converter_missing_keys(self, mock_utcnow):
+        self.CONF.set_override('drop_unmatched_notifications', False,
+                               group='event')
         # test a malformed notification
         now = datetime.datetime.utcnow()
         mock_utcnow.return_value = now
         c = converter.NotificationEventsConverter(
-            [],
-            self.fake_plugin_mgr,
-            add_catchall=True)
+            self.CONF, [], self.fake_plugin_mgr)
         message = {'event_type': "foo",
                    'message_id': "abc",
                    'publisher_id': "1"}
@@ -645,10 +644,10 @@ class TestNotificationConverter(ConverterBase):
         self.assertEqual(now, e.generated)
 
     def test_converter_with_catchall(self):
+        self.CONF.set_override('drop_unmatched_notifications', False,
+                               group='event')
         c = converter.NotificationEventsConverter(
-            self.valid_event_def1,
-            self.fake_plugin_mgr,
-            add_catchall=True)
+            self.CONF, self.valid_event_def1, self.fake_plugin_mgr)
         self.assertEqual(2, len(c.definitions))
         e = c.to_event(self.test_notification1)
         self.assertIsValidEvent(e, self.test_notification1)
@@ -665,10 +664,10 @@ class TestNotificationConverter(ConverterBase):
         self.assertDoesNotHaveTrait(e, 'host')
 
     def test_converter_without_catchall(self):
+        self.CONF.set_override('drop_unmatched_notifications', True,
+                               group='event')
         c = converter.NotificationEventsConverter(
-            self.valid_event_def1,
-            self.fake_plugin_mgr,
-            add_catchall=False)
+            self.CONF, self.valid_event_def1, self.fake_plugin_mgr)
         self.assertEqual(1, len(c.definitions))
         e = c.to_event(self.test_notification1)
         self.assertIsValidEvent(e, self.test_notification1)
@@ -681,10 +680,10 @@ class TestNotificationConverter(ConverterBase):
         self.assertIsNotValidEvent(e, self.test_notification2)
 
     def test_converter_empty_cfg_with_catchall(self):
+        self.CONF.set_override('drop_unmatched_notifications', False,
+                               group='event')
         c = converter.NotificationEventsConverter(
-            [],
-            self.fake_plugin_mgr,
-            add_catchall=True)
+            self.CONF, [], self.fake_plugin_mgr)
         self.assertEqual(1, len(c.definitions))
         e = c.to_event(self.test_notification1)
         self.assertIsValidEvent(e, self.test_notification1)
@@ -697,10 +696,10 @@ class TestNotificationConverter(ConverterBase):
         self.assertHasDefaultTraits(e)
 
     def test_converter_empty_cfg_without_catchall(self):
+        self.CONF.set_override('drop_unmatched_notifications', True,
+                               group='event')
         c = converter.NotificationEventsConverter(
-            [],
-            self.fake_plugin_mgr,
-            add_catchall=False)
+            self.CONF, [], self.fake_plugin_mgr)
         self.assertEqual(0, len(c.definitions))
         e = c.to_event(self.test_notification1)
         self.assertIsNotValidEvent(e, self.test_notification1)
@@ -715,67 +714,71 @@ class TestNotificationConverter(ConverterBase):
         return convert.to_event(message)
 
     def test_store_raw_all(self):
-        self.CONF.event.store_raw = ['info', 'error']
+        self.CONF.set_override('store_raw', ['info', 'error'],
+                               group='event')
         c = converter.NotificationEventsConverter(
-            [], self.fake_plugin_mgr)
+            self.CONF, [], self.fake_plugin_mgr)
         self.assertTrue(self._convert_message(c, 'info').raw)
         self.assertTrue(self._convert_message(c, 'error').raw)
 
     def test_store_raw_info_only(self):
-        self.CONF.event.store_raw = ['info']
+        self.CONF.set_override('store_raw', ['info'],
+                               group='event')
         c = converter.NotificationEventsConverter(
-            [], self.fake_plugin_mgr)
+            self.CONF, [], self.fake_plugin_mgr)
         self.assertTrue(self._convert_message(c, 'info').raw)
         self.assertFalse(self._convert_message(c, 'error').raw)
 
     def test_store_raw_error_only(self):
-        self.CONF.event.store_raw = ['error']
+        self.CONF.set_override('store_raw', ['error'],
+                               group='event')
         c = converter.NotificationEventsConverter(
-            [], self.fake_plugin_mgr)
+            self.CONF, [], self.fake_plugin_mgr)
         self.assertFalse(self._convert_message(c, 'info').raw)
         self.assertTrue(self._convert_message(c, 'error').raw)
 
     def test_store_raw_skip_all(self):
         c = converter.NotificationEventsConverter(
-            [], self.fake_plugin_mgr)
+            self.CONF, [], self.fake_plugin_mgr)
         self.assertFalse(self._convert_message(c, 'info').raw)
         self.assertFalse(self._convert_message(c, 'error').raw)
 
     def test_store_raw_info_only_no_case(self):
-        self.CONF.event.store_raw = ['INFO']
+        self.CONF.set_override('store_raw', ['INFO'],
+                               group='event')
         c = converter.NotificationEventsConverter(
-            [], self.fake_plugin_mgr)
+            self.CONF, [], self.fake_plugin_mgr)
         self.assertTrue(self._convert_message(c, 'info').raw)
         self.assertFalse(self._convert_message(c, 'error').raw)
 
     def test_store_raw_bad_skip_all(self):
-        self.CONF.event.store_raw = ['unknown']
+        self.CONF.set_override('store_raw', ['unknown'],
+                               group='event')
         c = converter.NotificationEventsConverter(
-            [], self.fake_plugin_mgr)
+            self.CONF, [], self.fake_plugin_mgr)
         self.assertFalse(self._convert_message(c, 'info').raw)
         self.assertFalse(self._convert_message(c, 'error').raw)
 
     def test_store_raw_bad_and_good(self):
-        self.CONF.event.store_raw = ['info', 'unknown']
+        self.CONF.set_override('store_raw', ['info', 'unknown'],
+                               group='event')
         c = converter.NotificationEventsConverter(
-            [], self.fake_plugin_mgr)
+            self.CONF, [], self.fake_plugin_mgr)
         self.assertTrue(self._convert_message(c, 'info').raw)
         self.assertFalse(self._convert_message(c, 'error').raw)
 
-    def test_setup_events_default_config(self):
+    @mock.patch('ceilometer.declarative.LOG')
+    def test_setup_events_load_config_in_code_tree(self, mocked_log):
         self.CONF.set_override('definitions_cfg_file',
                                '/not/existing/file', group='event')
         self.CONF.set_override('drop_unmatched_notifications',
                                False, group='event')
 
-        c = converter.setup_events(self.fake_plugin_mgr)
+        c = converter.setup_events(self.CONF, self.fake_plugin_mgr)
         self.assertIsInstance(c, converter.NotificationEventsConverter)
-        self.assertEqual(1, len(c.definitions))
-        self.assertTrue(c.definitions[0].is_catchall)
-
-        self.CONF.set_override('drop_unmatched_notifications',
-                               True, group='event')
-
-        c = converter.setup_events(self.fake_plugin_mgr)
-        self.assertIsInstance(c, converter.NotificationEventsConverter)
-        self.assertEqual(0, len(c.definitions))
+        log_called_args = mocked_log.debug.call_args_list
+        self.assertEqual(
+            'No Definitions configuration file found! Using default config.',
+            log_called_args[0][0][0])
+        self.assertTrue(log_called_args[1][0][0].startswith(
+            'Loading definitions configuration file:'))

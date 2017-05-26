@@ -12,10 +12,12 @@
 
 # Change-Id: I14e16a1a7d9813b324ee40545c07f0e88fb637b7
 
+import six
 import testtools
 
 from ceilometer.tests.tempest.api import base
 from tempest import config
+from tempest.lib.common.utils import data_utils
 from tempest.lib import decorators
 from tempest import test
 
@@ -24,8 +26,17 @@ CONF = config.CONF
 
 
 class TelemetryNotificationAPITest(base.BaseTelemetryTest):
+    @classmethod
+    def skip_checks(cls):
+        super(TelemetryNotificationAPITest, cls).skip_checks()
 
-    @test.idempotent_id('d7f8c1c8-d470-4731-8604-315d3956caae')
+        if ("gnocchi" in CONF.service_available and
+                CONF.service_available.gnocchi):
+            skip_msg = ("%s skipped as gnocchi is enabled" %
+                        cls.__name__)
+            raise cls.skipException(skip_msg)
+
+    @decorators.idempotent_id('d7f8c1c8-d470-4731-8604-315d3956caae')
     @test.services('compute')
     def test_check_nova_notification(self):
 
@@ -36,31 +47,16 @@ class TelemetryNotificationAPITest(base.BaseTelemetryTest):
         for metric in self.nova_notifications:
             self.await_samples(metric, query)
 
-    @test.attr(type="smoke")
-    @test.idempotent_id('04b10bfe-a5dc-47af-b22f-0460426bf499')
-    @test.services("image")
-    @testtools.skipIf(not CONF.image_feature_enabled.api_v1,
-                      "Glance api v1 is disabled")
-    def test_check_glance_v1_notifications(self):
-        body = self.create_image(self.image_client, is_public=False)
-        self.image_client.update_image(body['id'], data='data')
-
-        query = 'resource', 'eq', body['id']
-
-        self.image_client.delete_image(body['id'])
-
-        for metric in self.glance_notifications:
-            self.await_samples(metric, query)
-
-    @test.attr(type="smoke")
-    @test.idempotent_id('c240457d-d943-439b-8aea-85e26d64fe8f')
+    @decorators.idempotent_id('c240457d-d943-439b-8aea-85e26d64fe8f')
     @test.services("image")
     @testtools.skipIf(not CONF.image_feature_enabled.api_v2,
                       "Glance api v2 is disabled")
     def test_check_glance_v2_notifications(self):
         body = self.create_image(self.image_client_v2, visibility='private')
 
-        self.image_client_v2.store_image_file(body['id'], "file")
+        file_content = data_utils.random_bytes()
+        image_file = six.BytesIO(file_content)
+        self.image_client_v2.store_image_file(body['id'], image_file)
         self.image_client_v2.show_image_file(body['id'])
 
         query = 'resource', 'eq', body['id']
@@ -70,17 +66,21 @@ class TelemetryNotificationAPITest(base.BaseTelemetryTest):
 
 
 class TelemetryNotificationAdminAPITest(base.BaseTelemetryAdminTest):
+    @classmethod
+    def skip_checks(cls):
+        super(TelemetryNotificationAdminAPITest, cls).skip_checks()
 
-    @test.idempotent_id('29604198-8b45-4fc0-8af8-1cae4f94ebea')
+        if ("gnocchi" in CONF.service_available and
+                CONF.service_available.gnocchi):
+            skip_msg = ("%s skipped as gnocchi is enabled" %
+                        cls.__name__)
+            raise cls.skipException(skip_msg)
+
+    @decorators.idempotent_id('29604198-8b45-4fc0-8af8-1cae4f94ebea')
     @test.services('compute')
-    @decorators.skip_because(bug='1480490')
     def test_check_nova_notification_event_and_meter(self):
 
         body = self.create_server()
-
-        if CONF.telemetry.event_enabled:
-            query = ('instance_id', 'eq', body['id'])
-            self.await_events(query)
 
         query = ('resource', 'eq', body['id'])
         for metric in self.nova_notifications:

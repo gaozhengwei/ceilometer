@@ -24,15 +24,54 @@ import copy
 import uuid
 
 from oslo_config import cfg
-
+from oslo_utils import timeutils
+import six
 
 OPTS = [
     cfg.StrOpt('sample_source',
                default='openstack',
                help='Source for samples emitted on this instance.'),
+    cfg.ListOpt('reserved_metadata_namespace',
+                default=['metering.'],
+                help='List of metadata prefixes reserved for metering use.'),
+    cfg.IntOpt('reserved_metadata_length',
+               default=256,
+               help='Limit on length of reserved metadata values.'),
+    cfg.ListOpt('reserved_metadata_keys',
+                default=[],
+                help='List of metadata keys reserved for metering use. And '
+                     'these keys are additional to the ones included in the '
+                     'namespace.'),
 ]
 
-cfg.CONF.register_opts(OPTS)
+
+def add_reserved_user_metadata(conf, src_metadata, dest_metadata):
+    limit = conf.reserved_metadata_length
+    user_metadata = {}
+    for prefix in conf.reserved_metadata_namespace:
+        md = dict(
+            (k[len(prefix):].replace('.', '_'),
+             v[:limit] if isinstance(v, six.string_types) else v)
+            for k, v in src_metadata.items()
+            if (k.startswith(prefix) and
+                k[len(prefix):].replace('.', '_') not in dest_metadata)
+        )
+        user_metadata.update(md)
+
+    for metadata_key in conf.reserved_metadata_keys:
+        md = dict(
+            (k.replace('.', '_'),
+             v[:limit] if isinstance(v, six.string_types) else v)
+            for k, v in src_metadata.items()
+            if (k == metadata_key and
+                k.replace('.', '_') not in dest_metadata)
+        )
+        user_metadata.update(md)
+
+    if user_metadata:
+        dest_metadata['user_metadata'] = user_metadata
+
+    return dest_metadata
 
 
 # Fields explanation:
@@ -52,6 +91,7 @@ cfg.CONF.register_opts(OPTS)
 # Resource metadata: various metadata
 # id: an uuid of a sample, can be taken from API  when post sample via API
 class Sample(object):
+    SOURCE_DEFAULT = "openstack"
 
     def __init__(self, name, type, unit, volume, user_id, project_id,
                  resource_id, timestamp=None, resource_metadata=None,
@@ -65,7 +105,7 @@ class Sample(object):
         self.resource_id = resource_id
         self.timestamp = timestamp
         self.resource_metadata = resource_metadata or {}
-        self.source = source or cfg.CONF.sample_source
+        self.source = source or self.SOURCE_DEFAULT
         self.id = id or str(uuid.uuid1())
 
     def as_dict(self):
@@ -98,6 +138,16 @@ class Sample(object):
 
     def set_timestamp(self, timestamp):
         self.timestamp = timestamp
+
+    def get_iso_timestamp(self):
+        return timeutils.parse_isotime(self.timestamp)
+
+
+def setup(conf):
+    # NOTE(sileht): Instead of passing the cfg.CONF everywhere in ceilometer
+    # prepare_service will override this default
+    Sample.SOURCE_DEFAULT = conf.sample_source
+
 
 TYPE_GAUGE = 'gauge'
 TYPE_DELTA = 'delta'

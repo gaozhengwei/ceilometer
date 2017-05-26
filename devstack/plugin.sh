@@ -34,9 +34,8 @@
 # of Ceilometer (see within for additional settings):
 #
 #   CEILOMETER_PIPELINE_INTERVAL:  Seconds between pipeline processing runs. Default 600.
-#   CEILOMETER_BACKEND:            Database backend (e.g. 'mysql', 'mongodb', 'es')
+#   CEILOMETER_BACKEND:            Database backend (e.g. 'mysql', 'mongodb', 'gnocchi', 'none')
 #   CEILOMETER_COORDINATION_URL:   URL for group membership service provided by tooz.
-#   CEILOMETER_EVENTS:             Set to True to enable event collection
 #   CEILOMETER_EVENT_ALARM:        Set to True to enable publisher for event alarming
 
 # Save trace setting
@@ -139,11 +138,6 @@ function _ceilometer_prepare_storage_backend {
         pip_install_gr pymongo
         _ceilometer_install_mongodb
     fi
-
-    if [ "$CEILOMETER_BACKEND" = 'es' ] ; then
-        ${TOP_DIR}/pkg/elasticsearch.sh download
-        ${TOP_DIR}/pkg/elasticsearch.sh install
-    fi
 }
 
 
@@ -164,28 +158,28 @@ function _ceilometer_prepare_virt_drivers {
 
 # Create ceilometer related accounts in Keystone
 function ceilometer_create_accounts {
+    # At this time, the /etc/openstack/clouds.yaml is available,
+    # we could leverage that by setting OS_CLOUD
+    OLD_OS_CLOUD=$OS_CLOUD
+    export OS_CLOUD='devstack-admin'
+
+    create_service_user "ceilometer" "admin"
+
     if is_service_enabled ceilometer-api; then
-        # At this time, the /etc/openstack/clouds.yaml is available,
-        # we could leverage that by setting OS_CLOUD
-        OLD_OS_CLOUD=$OS_CLOUD
-        export OS_CLOUD='devstack-admin'
-
-        create_service_user "ceilometer" "admin"
-
         get_or_create_service "ceilometer" "metering" "OpenStack Telemetry Service"
         get_or_create_endpoint "metering" \
             "$REGION_NAME" \
             "$(ceilometer_service_url)" \
             "$(ceilometer_service_url)" \
             "$(ceilometer_service_url)"
-
-        if is_service_enabled swift; then
-            # Ceilometer needs ResellerAdmin role to access Swift account stats.
-            get_or_add_user_project_role "ResellerAdmin" "ceilometer" $SERVICE_PROJECT_NAME
-        fi
-
-        export OS_CLOUD=$OLD_OS_CLOUD
     fi
+
+    if is_service_enabled swift; then
+        # Ceilometer needs ResellerAdmin role to access Swift account stats.
+        get_or_add_user_project_role "ResellerAdmin" "ceilometer" $SERVICE_PROJECT_NAME
+    fi
+
+    export OS_CLOUD=$OLD_OS_CLOUD
 }
 
 # Activities to do before ceilometer has been installed.
@@ -203,11 +197,9 @@ function _ceilometer_cleanup_apache_wsgi {
 }
 
 function _ceilometer_drop_database {
-    if is_service_enabled ceilometer-collector ceilometer-api ; then
+    if is_service_enabled ceilometer-api ; then
         if [ "$CEILOMETER_BACKEND" = 'mongodb' ] ; then
             mongo ceilometer --eval "db.dropDatabase();"
-        elif [ "$CEILOMETER_BACKEND" = 'es' ] ; then
-            curl -XDELETE "localhost:9200/events_*"
         fi
     fi
 }
@@ -225,41 +217,39 @@ function cleanup_ceilometer {
 # NOTE(cdent): This currently only works for redis. Still working
 # out how to express the other backends.
 function _ceilometer_configure_cache_backend {
+    iniset $CEILOMETER_CONF cache enabled True
     iniset $CEILOMETER_CONF cache backend $CEILOMETER_CACHE_BACKEND
-    iniset $CEILOMETER_CONF cache backend_argument url:$CEILOMETER_CACHE_URL
-    iniadd_literal $CEILOMETER_CONF cache backend_argument distributed_lock:True
+
+    inidelete $CEILOMETER_CONF cache backend_argument
+    iniadd $CEILOMETER_CONF cache backend_argument url:$CEILOMETER_CACHE_URL
+    iniadd $CEILOMETER_CONF cache backend_argument distributed_lock:True
     if [[ "${CEILOMETER_CACHE_BACKEND##*.}" == "redis" ]]; then
-        iniadd_literal $CEILOMETER_CONF cache backend_argument db:0
-        iniadd_literal $CEILOMETER_CONF cache backend_argument redis_expiration_time:600
+        iniadd $CEILOMETER_CONF cache backend_argument db:0
+        iniadd $CEILOMETER_CONF cache backend_argument redis_expiration_time:600
     fi
 }
 
 
 # Set configuration for storage backend.
 function _ceilometer_configure_storage_backend {
-    if [ "$CEILOMETER_BACKEND" = 'mysql' ] || [ "$CEILOMETER_BACKEND" = 'postgresql' ] ; then
-        iniset $CEILOMETER_CONF database event_connection $(database_connection_url ceilometer)
+
+    inidelete $CEILOMETER_CONF database metering_connection
+
+    if [ "$CEILOMETER_BACKEND" = 'none' ] ; then
+        # It's ok for the backend to be 'none', if panko is enabled. We do not
+        # combine this condition with the outer if statement, so that the else
+        # clause below is not executed.
+        if ! is_service_enabled panko-api; then
+            echo_summary "All Ceilometer backends seems disabled, set \$CEILOMETER_BACKEND to select one."
+        fi
+    elif [ "$CEILOMETER_BACKEND" = 'mysql' ] || [ "$CEILOMETER_BACKEND" = 'postgresql' ] ; then
         iniset $CEILOMETER_CONF database metering_connection $(database_connection_url ceilometer)
-    elif [ "$CEILOMETER_BACKEND" = 'es' ] ; then
-        # es is only supported for events. we will use sql for metering.
-        iniset $CEILOMETER_CONF database event_connection es://localhost:9200
-        iniset $CEILOMETER_CONF database metering_connection $(database_connection_url ceilometer)
-        ${TOP_DIR}/pkg/elasticsearch.sh start
     elif [ "$CEILOMETER_BACKEND" = 'mongodb' ] ; then
-        iniset $CEILOMETER_CONF database event_connection mongodb://localhost:27017/ceilometer
         iniset $CEILOMETER_CONF database metering_connection mongodb://localhost:27017/ceilometer
     elif [ "$CEILOMETER_BACKEND" = 'gnocchi' ] ; then
-        gnocchi_url=$(gnocchi_service_url)
-        iniset $CEILOMETER_CONF DEFAULT meter_dispatchers gnocchi
-        # FIXME(sileht): We shouldn't load event_dispatchers if store_event is False
-        iniset $CEILOMETER_CONF DEFAULT event_dispatchers ""
-        iniset $CEILOMETER_CONF notification store_events False
-        # NOTE(gordc): set higher retry in case gnocchi is started after ceilometer on a slow machine
-        iniset $CEILOMETER_CONF storage max_retries 20
         # NOTE(gordc): set batching to better handle recording on a slow machine
         iniset $CEILOMETER_CONF collector batch_size 50
         iniset $CEILOMETER_CONF collector batch_timeout 5
-        iniset $CEILOMETER_CONF dispatcher_gnocchi url $gnocchi_url
         iniset $CEILOMETER_CONF dispatcher_gnocchi archive_policy ${GNOCCHI_ARCHIVE_POLICY}
         if is_service_enabled swift && [[ "$GNOCCHI_STORAGE_BACKEND" = 'swift' ]] ; then
             iniset $CEILOMETER_CONF dispatcher_gnocchi filter_service_activity "True"
@@ -270,6 +260,18 @@ function _ceilometer_configure_storage_backend {
     else
         die $LINENO "Unable to configure unknown CEILOMETER_BACKEND $CEILOMETER_BACKEND"
     fi
+
+    if [ "$CEILOMETER_BACKEND" = 'mysql' ] || [ "$CEILOMETER_BACKEND" = 'postgresql' ] || [ "$CEILOMETER_BACKEND" = 'mongodb' ]; then
+        sed -i 's/gnocchi:\/\//database:\/\//g' $CEILOMETER_CONF_DIR/event_pipeline.yaml $CEILOMETER_CONF_DIR/pipeline.yaml
+    fi
+
+    # configure panko
+    if is_service_enabled panko-api; then
+        if ! grep -q 'panko' $CEILOMETER_CONF_DIR/event_pipeline.yaml ; then
+            echo '          - panko://' >> $CEILOMETER_CONF_DIR/event_pipeline.yaml
+        fi
+    fi
+
     _ceilometer_drop_database
 }
 
@@ -287,6 +289,7 @@ function configure_ceilometer {
         iniset $CEILOMETER_CONF coordination backend_url $CEILOMETER_COORDINATION_URL
         iniset $CEILOMETER_CONF notification workload_partitioning True
         iniset $CEILOMETER_CONF notification workers $API_WORKERS
+        iniset $CEILOMETER_CONF notification pipeline_processing_queues $API_WORKERS
     fi
 
     if [[ -n "$CEILOMETER_CACHE_BACKEND" ]]; then
@@ -299,14 +302,14 @@ function configure_ceilometer {
     # with rootwrap installation done elsewhere and also clobber
     # ceilometer.conf settings that have already been made.
     # Anyway, explicit is better than implicit.
-    for conffile in policy.json api_paste.ini pipeline.yaml \
-                    event_definitions.yaml event_pipeline.yaml \
-                    gnocchi_resources.yaml; do
+    for conffile in policy.json api_paste.ini polling.yaml; do
         cp $CEILOMETER_DIR/etc/ceilometer/$conffile $CEILOMETER_CONF_DIR
     done
 
+    cp $CEILOMETER_DIR/ceilometer/pipeline/data/*.yaml $CEILOMETER_CONF_DIR
+
     if [ "$CEILOMETER_PIPELINE_INTERVAL" ]; then
-        sed -i "s/interval:.*/interval: ${CEILOMETER_PIPELINE_INTERVAL}/" $CEILOMETER_CONF_DIR/pipeline.yaml
+        sed -i "s/interval:.*/interval: ${CEILOMETER_PIPELINE_INTERVAL}/" $CEILOMETER_CONF_DIR/polling.yaml
     fi
     if [ "$CEILOMETER_EVENT_ALARM" == "True" ]; then
         if ! grep -q '^ *- notifier://?topic=alarm.all$' $CEILOMETER_CONF_DIR/event_pipeline.yaml; then
@@ -327,11 +330,12 @@ function configure_ceilometer {
 
     configure_auth_token_middleware $CEILOMETER_CONF ceilometer $CEILOMETER_AUTH_CACHE_DIR
 
-    iniset $CEILOMETER_CONF notification store_events $CEILOMETER_EVENTS
-
     # Configure storage
-    if is_service_enabled ceilometer-collector ceilometer-api; then
+    if is_service_enabled ceilometer-api; then
         _ceilometer_configure_storage_backend
+    fi
+
+    if is_service_enabled ceilometer-collector; then
         iniset $CEILOMETER_CONF collector workers $API_WORKERS
     fi
 
@@ -343,7 +347,6 @@ function configure_ceilometer {
     fi
 
     if is_service_enabled ceilometer-api && [ "$CEILOMETER_USE_MOD_WSGI" == "True" ]; then
-        iniset $CEILOMETER_CONF api pecan_debug "False"
         _ceilometer_config_apache_wsgi
     fi
 
@@ -359,11 +362,16 @@ function init_ceilometer {
     sudo install -d -o $STACK_USER $CEILOMETER_AUTH_CACHE_DIR
     rm -f $CEILOMETER_AUTH_CACHE_DIR/*
 
-    if is_service_enabled ceilometer-collector ceilometer-api && is_service_enabled mysql postgresql ; then
-        if [ "$CEILOMETER_BACKEND" = 'mysql' ] || [ "$CEILOMETER_BACKEND" = 'postgresql' ] || [ "$CEILOMETER_BACKEND" = 'es' ] ; then
-            recreate_database ceilometer
-            $CEILOMETER_BIN_DIR/ceilometer-dbsync
+    if is_service_enabled ceilometer-api; then
+        if is_service_enabled mysql postgresql ; then
+            if [ "$CEILOMETER_BACKEND" = 'mysql' ] || [ "$CEILOMETER_BACKEND" = 'postgresql' ] || [ "$CEILOMETER_BACKEND" = 'es' ] ; then
+                recreate_database ceilometer
+                $CEILOMETER_BIN_DIR/ceilometer-upgrade --skip-gnocchi-resource-types
+            fi
         fi
+    fi
+    if is_service_enabled gnocchi && [ "$CEILOMETER_BACKEND" = 'gnocchi' ]; then
+        $CEILOMETER_BIN_DIR/ceilometer-upgrade --skip-metering-database
     fi
 }
 
@@ -377,7 +385,7 @@ function install_ceilometer {
         _ceilometer_prepare_coordination
     fi
 
-    if is_service_enabled ceilometer-collector ceilometer-api; then
+    if is_service_enabled ceilometer-api; then
         _ceilometer_prepare_storage_backend
     fi
 
@@ -404,11 +412,10 @@ function install_ceilometerclient {
 # start_ceilometer() - Start running processes, including screen
 function start_ceilometer {
     run_process ceilometer-acentral "$CEILOMETER_BIN_DIR/ceilometer-polling --polling-namespaces central --config-file $CEILOMETER_CONF"
-    run_process ceilometer-anotification "$CEILOMETER_BIN_DIR/ceilometer-agent-notification --config-file $CEILOMETER_CONF"
     run_process ceilometer-aipmi "$CEILOMETER_BIN_DIR/ceilometer-polling --polling-namespaces ipmi --config-file $CEILOMETER_CONF"
 
     if [[ "$CEILOMETER_USE_MOD_WSGI" == "False" ]]; then
-        run_process ceilometer-api "$CEILOMETER_BIN_DIR/ceilometer-api -d -v --config-file $CEILOMETER_CONF"
+        run_process ceilometer-api "$CEILOMETER_BIN_DIR/ceilometer-api --port $CEILOMETER_SERVICE_PORT"
     elif is_service_enabled ceilometer-api; then
         enable_apache_site ceilometer
         restart_apache_server
@@ -416,8 +423,9 @@ function start_ceilometer {
         tail_log ceilometer-api /var/log/$APACHE_NAME/ceilometer_access.log
     fi
 
-    # run the collector after restarting apache as it needs
+    # run the notification agent/collector after restarting apache as it needs
     # operational keystone if using gnocchi
+    run_process ceilometer-anotification "$CEILOMETER_BIN_DIR/ceilometer-agent-notification --config-file $CEILOMETER_CONF"
     run_process ceilometer-collector "$CEILOMETER_BIN_DIR/ceilometer-collector --config-file $CEILOMETER_CONF"
 
     # Start the compute agent late to allow time for the collector to
@@ -455,7 +463,7 @@ if is_service_enabled ceilometer; then
         preinstall_ceilometer
     elif [[ "$1" == "stack" && "$2" == "install" ]]; then
         echo_summary "Installing Ceilometer"
-        # Use stack_install_service here to account for vitualenv
+        # Use stack_install_service here to account for virtualenv
         stack_install_service ceilometer
     elif [[ "$1" == "stack" && "$2" == "post-config" ]]; then
         echo_summary "Configuring Ceilometer"
@@ -468,6 +476,8 @@ if is_service_enabled ceilometer; then
         init_ceilometer
         # Start the services
         start_ceilometer
+    elif [[ "$1" == "stack" && "$2" == "test-config" ]]; then
+        iniset $TEMPEST_CONFIG telemetry alarm_granularity $CEILOMETER_ALARM_GRANULARITY
     fi
 
     if [[ "$1" == "unstack" ]]; then

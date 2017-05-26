@@ -20,13 +20,13 @@ import socket
 
 import mock
 import msgpack
-from oslo_config import fixture as fixture_config
 from oslo_utils import netutils
 from oslotest import base
 
 from ceilometer.publisher import udp
 from ceilometer.publisher import utils
 from ceilometer import sample
+from ceilometer import service
 
 
 COUNTER_SOURCE = 'testsource'
@@ -110,12 +110,12 @@ class TestUDPPublisher(base.BaseTestCase):
 
     def setUp(self):
         super(TestUDPPublisher, self).setUp()
-        self.CONF = self.useFixture(fixture_config.Config()).conf
+        self.CONF = service.prepare_service([], [])
         self.CONF.publisher.telemetry_secret = 'not-so-secret'
 
     def _check_udp_socket(self, url, expected_addr_family):
         with mock.patch.object(socket, 'socket') as mock_socket:
-            udp.UDPPublisher(netutils.urlsplit(url))
+            udp.UDPPublisher(self.CONF, netutils.urlsplit(url))
             mock_socket.assert_called_with(expected_addr_family,
                                            socket.SOCK_DGRAM)
 
@@ -127,11 +127,34 @@ class TestUDPPublisher(base.BaseTestCase):
         self._check_udp_socket('udp://[::1]:4952',
                                socket.AF_INET6)
 
+    def test_publisher_udp_socket_ipv4_hostname(self):
+        host = "ipv4.google.com"
+        try:
+            socket.getaddrinfo(host, None,
+                               socket.AF_INET,
+                               socket.SOCK_DGRAM)
+        except socket.gaierror:
+            self.skipTest("cannot resolve not running test")
+        url = "udp://"+host+":4952"
+        self._check_udp_socket(url, socket.AF_INET)
+
+    def test_publisher_udp_socket_ipv6_hostname(self):
+        host = "ipv6.google.com"
+        try:
+            socket.getaddrinfo(host, None,
+                               socket.AF_INET6,
+                               socket.SOCK_DGRAM)
+        except socket.gaierror:
+            self.skipTest("cannot resolve not running test")
+        url = "udp://"+host+":4952"
+        self._check_udp_socket(url, socket.AF_INET6)
+
     def test_published(self):
         self.data_sent = []
         with mock.patch('socket.socket',
                         self._make_fake_socket(self.data_sent)):
             publisher = udp.UDPPublisher(
+                self.CONF,
                 netutils.urlsplit('udp://somehost'))
         publisher.publish_samples(self.test_data)
 
@@ -170,5 +193,6 @@ class TestUDPPublisher(base.BaseTestCase):
         with mock.patch('socket.socket',
                         self._make_broken_socket):
             publisher = udp.UDPPublisher(
+                self.CONF,
                 netutils.urlsplit('udp://localhost'))
         publisher.publish_samples(self.test_data)

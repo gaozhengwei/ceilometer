@@ -17,7 +17,6 @@ from oslo_log import log
 from oslo_utils import timeutils
 
 from ceilometer.agent import plugin_base
-from ceilometer.i18n import _
 from ceilometer import nova_client
 
 
@@ -47,30 +46,23 @@ OPTS = [
                help='SNMPd v3 encryption password of all the nodes '
                     'running in the cloud.',
                secret=True),
+    cfg.StrOpt('tripleo_network_name',
+               default='ctlplane',
+               help='Name of the control plane Tripleo network')
 
 
 ]
-CONF = cfg.CONF
-CONF.register_opts(OPTS, group='hardware')
 
 
 class NodesDiscoveryTripleO(plugin_base.DiscoveryBase):
-    def __init__(self):
-        super(NodesDiscoveryTripleO, self).__init__()
-        self.nova_cli = nova_client.Client()
+    def __init__(self, conf):
+        super(NodesDiscoveryTripleO, self).__init__(conf)
+        self.nova_cli = nova_client.Client(conf)
         self.last_run = None
         self.instances = {}
 
-    @staticmethod
-    def _address(instance, field):
-        return instance.addresses['ctlplane'][0].get(field)
-
-    @staticmethod
-    def _make_resource_url(ip):
-        params = [('readonly_user_auth_proto', 'auth_proto'),
-                  ('readonly_user_priv_proto', 'priv_proto'),
-                  ('readonly_user_priv_password', 'priv_password')]
-        hwconf = CONF.hardware
+    def _make_resource_url(self, ip):
+        hwconf = self.conf.hardware
         url = hwconf.url_scheme
         username = hwconf.readonly_user_name
         password = hwconf.readonly_user_password
@@ -82,9 +74,10 @@ class NodesDiscoveryTripleO(plugin_base.DiscoveryBase):
             url += '@'
         url += ip
 
-        query = "&".join(
-            param + "=" + hwconf.get(conf) for (conf, param) in params
-            if hwconf.get(conf))
+        opts = ['auth_proto', 'priv_proto', 'priv_password']
+        query = "&".join(opt + "=" + hwconf['readonly_user_%s' % opt]
+                         for opt in opts
+                         if hwconf['readonly_user_%s' % opt])
         if query:
             url += '?' + query
 
@@ -114,22 +107,28 @@ class NodesDiscoveryTripleO(plugin_base.DiscoveryBase):
 
         resources = []
         for instance in self.instances.values():
+            addresses = instance.addresses.get(
+                self.conf.hardware.tripleo_network_name)
+            if addresses is None:
+                # NOTE(sileht): This is not a tripleo undercloud instance, this
+                # is a cheap detection if ironic node deployed by tripleo, but
+                # nova don't expose anything more useful and we must not log a
+                # ERROR when the instance is not a tripleo undercloud one.
+                continue
             try:
-                ip_address = self._address(instance, 'addr')
+                ip_address = addresses[0].get('addr')
                 final_address = self._make_resource_url(ip_address)
-
                 resource = {
                     'resource_id': instance.id,
                     'resource_url': final_address,
-                    'mac_addr': self._address(instance,
-                                              'OS-EXT-IPS-MAC:mac_addr'),
+                    'mac_addr': addresses[0].get('OS-EXT-IPS-MAC:mac_addr'),
                     'image_id': instance.image['id'],
                     'flavor_id': instance.flavor['id']
                 }
 
                 resources.append(resource)
             except KeyError:
-                LOG.error(_("Couldn't obtain IP address of "
-                            "instance %s") % instance.id)
+                LOG.error("Couldn't obtain IP address of "
+                          "instance %s" % instance.id)
 
         return resources

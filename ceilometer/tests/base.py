@@ -14,15 +14,17 @@
 """Test base classes.
 """
 import functools
-import os.path
+import os
+import tempfile
 
+import fixtures
 import oslo_messaging.conffixture
 from oslo_utils import timeutils
 from oslotest import base
-from oslotest import mockpatch
 import six
 from testtools import testcase
 import webtest
+import yaml
 
 import ceilometer
 from ceilometer import messaging
@@ -31,17 +33,24 @@ from ceilometer import messaging
 class BaseTestCase(base.BaseTestCase):
     def setup_messaging(self, conf, exchange=None):
         self.useFixture(oslo_messaging.conffixture.ConfFixture(conf))
-        conf.set_override("notification_driver", "messaging")
+        conf.set_override("notification_driver", ["messaging"])
         if not exchange:
             exchange = 'ceilometer'
         conf.set_override("control_exchange", exchange)
 
         # NOTE(sileht): Ensure a new oslo.messaging driver is loaded
         # between each tests
-        self.transport = messaging.get_transport("fake://", cache=False)
-        self.useFixture(mockpatch.Patch(
+        self.transport = messaging.get_transport(conf, "fake://", cache=False)
+        self.useFixture(fixtures.MockPatch(
             'ceilometer.messaging.get_transport',
             return_value=self.transport))
+
+    def cfg2file(self, data):
+        cfgfile = tempfile.NamedTemporaryFile(mode='w', delete=False)
+        self.addCleanup(os.remove, cfgfile.name)
+        cfgfile.write(yaml.safe_dump(data))
+        cfgfile.close()
+        return cfgfile.name
 
     def assertTimestampEqual(self, first, second, msg=None):
         """Checks that two timestamps are equals.

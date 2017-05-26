@@ -19,7 +19,6 @@ import mock
 from ceilometer.agent import manager
 from ceilometer.compute.pollsters import net
 from ceilometer.compute.virt import inspector as virt_inspector
-from ceilometer import sample
 from ceilometer.tests.unit.compute.pollsters import base
 
 
@@ -40,41 +39,49 @@ class TestNetPollster(base.TestPollsterBase):
 
     def setUp(self):
         super(TestNetPollster, self).setUp()
-        self.vnic0 = virt_inspector.Interface(
+        self.vnic0 = virt_inspector.InterfaceStats(
             name='vnet0',
             fref='fa163e71ec6e',
             mac='fa:16:3e:71:ec:6d',
             parameters=dict(ip='10.0.0.2',
                             projmask='255.255.255.0',
                             projnet='proj1',
-                            dhcp_server='10.0.0.1'))
-        stats0 = virt_inspector.InterfaceStats(rx_bytes=1, rx_packets=2,
-                                               tx_bytes=3, tx_packets=4)
-        self.vnic1 = virt_inspector.Interface(
+                            dhcp_server='10.0.0.1'),
+            rx_bytes=1, rx_packets=2,
+            rx_drop=20, rx_errors=21,
+            tx_bytes=3, tx_packets=4,
+            tx_drop=22, tx_errors=23)
+
+        self.vnic1 = virt_inspector.InterfaceStats(
             name='vnet1',
             fref='fa163e71ec6f',
             mac='fa:16:3e:71:ec:6e',
             parameters=dict(ip='192.168.0.3',
                             projmask='255.255.255.0',
                             projnet='proj2',
-                            dhcp_server='10.0.0.2'))
-        stats1 = virt_inspector.InterfaceStats(rx_bytes=5, rx_packets=6,
-                                               tx_bytes=7, tx_packets=8)
-        self.vnic2 = virt_inspector.Interface(
+                            dhcp_server='10.0.0.2'),
+            rx_bytes=5, rx_packets=6,
+            rx_drop=24, rx_errors=25,
+            tx_bytes=7, tx_packets=8,
+            tx_drop=26, tx_errors=27)
+
+        self.vnic2 = virt_inspector.InterfaceStats(
             name='vnet2',
             fref=None,
             mac='fa:18:4e:72:fc:7e',
             parameters=dict(ip='192.168.0.4',
                             projmask='255.255.255.0',
                             projnet='proj3',
-                            dhcp_server='10.0.0.3'))
-        stats2 = virt_inspector.InterfaceStats(rx_bytes=9, rx_packets=10,
-                                               tx_bytes=11, tx_packets=12)
+                            dhcp_server='10.0.0.3'),
+            rx_bytes=9, rx_packets=10,
+            rx_drop=28, rx_errors=29,
+            tx_bytes=11, tx_packets=12,
+            tx_drop=30, tx_errors=31)
 
         vnics = [
-            (self.vnic0, stats0),
-            (self.vnic1, stats1),
-            (self.vnic2, stats2),
+            self.vnic0,
+            self.vnic1,
+            self.vnic2,
         ]
         self.inspector.inspect_vnics = mock.Mock(return_value=vnics)
 
@@ -112,8 +119,8 @@ class TestNetPollster(base.TestPollsterBase):
 
     @mock.patch('ceilometer.pipeline.setup_pipeline', mock.MagicMock())
     def _check_get_samples(self, factory, expected):
-        mgr = manager.AgentManager()
-        pollster = factory()
+        mgr = manager.AgentManager(0, self.CONF)
+        pollster = factory(self.CONF)
         samples = list(pollster.get_samples(mgr, {}, [self.instance]))
         self.assertEqual(3, len(samples))  # one for each nic
         self.assertEqual(set([samples[0].name]),
@@ -175,109 +182,112 @@ class TestNetPollster(base.TestPollsterBase):
              ],
         )
 
+    def test_incoming_drops(self):
+        instance_name_id = "%s-%s" % (self.instance.name, self.instance.id)
+        self._check_get_samples(
+            net.IncomingDropPollster,
+            [('10.0.0.2', 20, self.vnic0.fref),
+             ('192.168.0.3', 24, self.vnic1.fref),
+             ('192.168.0.4', 28,
+              "%s-%s" % (instance_name_id, self.vnic2.name)),
+             ],
+        )
+
+    def test_outgoing_drops(self):
+        instance_name_id = "%s-%s" % (self.instance.name, self.instance.id)
+        self._check_get_samples(
+            net.OutgoingDropPollster,
+            [('10.0.0.2', 22, self.vnic0.fref),
+             ('192.168.0.3', 26, self.vnic1.fref),
+             ('192.168.0.4', 30,
+              "%s-%s" % (instance_name_id, self.vnic2.name)),
+             ],
+        )
+
+    def test_incoming_errors(self):
+        instance_name_id = "%s-%s" % (self.instance.name, self.instance.id)
+        self._check_get_samples(
+            net.IncomingErrorsPollster,
+            [('10.0.0.2', 21, self.vnic0.fref),
+             ('192.168.0.3', 25, self.vnic1.fref),
+             ('192.168.0.4', 29,
+              "%s-%s" % (instance_name_id, self.vnic2.name)),
+             ],
+        )
+
+    def test_outgoing_errors(self):
+        instance_name_id = "%s-%s" % (self.instance.name, self.instance.id)
+        self._check_get_samples(
+            net.OutgoingErrorsPollster,
+            [('10.0.0.2', 23, self.vnic0.fref),
+             ('192.168.0.3', 27, self.vnic1.fref),
+             ('192.168.0.4', 31,
+              "%s-%s" % (instance_name_id, self.vnic2.name)),
+             ],
+        )
+
     @mock.patch('ceilometer.pipeline.setup_pipeline', mock.MagicMock())
     def test_metadata(self):
         factory = net.OutgoingBytesPollster
-        pollster = factory()
-        sm = pollster.make_vnic_sample(self.faux_instance,
-                                       name='network.outgoing.bytes',
-                                       type=sample.TYPE_CUMULATIVE,
-                                       unit='B',
-                                       volume=100,
-                                       vnic_data=self.vnic0)
-
-        user_metadata = sm.resource_metadata['user_metadata']
+        pollster = factory(self.CONF)
+        mgr = manager.AgentManager(0, self.CONF)
+        pollster = factory(self.CONF)
+        s = list(pollster.get_samples(mgr, {}, [self.faux_instance]))[0]
+        user_metadata = s.resource_metadata['user_metadata']
         expected = self.INSTANCE_PROPERTIES[
             'metadata']['metering.autoscale.group'][:256]
         self.assertEqual(expected, user_metadata['autoscale_group'])
         self.assertEqual(2, len(user_metadata))
 
 
-class TestNetPollsterCache(base.TestPollsterBase):
-
-    @mock.patch('ceilometer.pipeline.setup_pipeline', mock.MagicMock())
-    def _check_get_samples_cache(self, factory):
-        vnic0 = virt_inspector.Interface(
-            name='vnet0',
-            fref='fa163e71ec6e',
-            mac='fa:16:3e:71:ec:6d',
-            parameters=dict(ip='10.0.0.2',
-                            projmask='255.255.255.0',
-                            projnet='proj1',
-                            dhcp_server='10.0.0.1'))
-        stats0 = virt_inspector.InterfaceStats(rx_bytes=1, rx_packets=2,
-                                               tx_bytes=3, tx_packets=4)
-        vnics = [(vnic0, stats0)]
-
-        mgr = manager.AgentManager()
-        pollster = factory()
-        cache = {
-            pollster.CACHE_KEY_VNIC: {
-                self.instance.id: vnics,
-            },
-        }
-        samples = list(pollster.get_samples(mgr, cache, [self.instance]))
-        self.assertEqual(1, len(samples))
-
-    def test_incoming_bytes(self):
-        self._check_get_samples_cache(net.IncomingBytesPollster)
-
-    def test_outgoing_bytes(self):
-        self._check_get_samples_cache(net.OutgoingBytesPollster)
-
-    def test_incoming_packets(self):
-        self._check_get_samples_cache(net.IncomingPacketsPollster)
-
-    def test_outgoing_packets(self):
-        self._check_get_samples_cache(net.OutgoingPacketsPollster)
-
-
 class TestNetRatesPollster(base.TestPollsterBase):
 
     def setUp(self):
         super(TestNetRatesPollster, self).setUp()
-        self.vnic0 = virt_inspector.Interface(
+        self.vnic0 = virt_inspector.InterfaceRateStats(
             name='vnet0',
             fref='fa163e71ec6e',
             mac='fa:16:3e:71:ec:6d',
             parameters=dict(ip='10.0.0.2',
                             projmask='255.255.255.0',
                             projnet='proj1',
-                            dhcp_server='10.0.0.1'))
-        stats0 = virt_inspector.InterfaceRateStats(rx_bytes_rate=1,
-                                                   tx_bytes_rate=2)
-        self.vnic1 = virt_inspector.Interface(
+                            dhcp_server='10.0.0.1'),
+            rx_bytes_rate=1,
+            tx_bytes_rate=2)
+
+        self.vnic1 = virt_inspector.InterfaceRateStats(
             name='vnet1',
             fref='fa163e71ec6f',
             mac='fa:16:3e:71:ec:6e',
             parameters=dict(ip='192.168.0.3',
                             projmask='255.255.255.0',
                             projnet='proj2',
-                            dhcp_server='10.0.0.2'))
-        stats1 = virt_inspector.InterfaceRateStats(rx_bytes_rate=3,
-                                                   tx_bytes_rate=4)
-        self.vnic2 = virt_inspector.Interface(
+                            dhcp_server='10.0.0.2'),
+            rx_bytes_rate=3,
+            tx_bytes_rate=4)
+
+        self.vnic2 = virt_inspector.InterfaceRateStats(
             name='vnet2',
             fref=None,
             mac='fa:18:4e:72:fc:7e',
             parameters=dict(ip='192.168.0.4',
                             projmask='255.255.255.0',
                             projnet='proj3',
-                            dhcp_server='10.0.0.3'))
-        stats2 = virt_inspector.InterfaceRateStats(rx_bytes_rate=5,
-                                                   tx_bytes_rate=6)
+                            dhcp_server='10.0.0.3'),
+            rx_bytes_rate=5,
+            tx_bytes_rate=6)
 
         vnics = [
-            (self.vnic0, stats0),
-            (self.vnic1, stats1),
-            (self.vnic2, stats2),
+            self.vnic0,
+            self.vnic1,
+            self.vnic2,
         ]
         self.inspector.inspect_vnic_rates = mock.Mock(return_value=vnics)
 
     @mock.patch('ceilometer.pipeline.setup_pipeline', mock.MagicMock())
     def _check_get_samples(self, factory, expected):
-        mgr = manager.AgentManager()
-        pollster = factory()
+        mgr = manager.AgentManager(0, self.CONF)
+        pollster = factory(self.CONF)
         samples = list(pollster.get_samples(mgr, {}, [self.instance]))
         self.assertEqual(3, len(samples))  # one for each nic
         self.assertEqual(set([samples[0].name]),

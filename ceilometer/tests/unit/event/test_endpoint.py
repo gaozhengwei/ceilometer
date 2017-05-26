@@ -14,12 +14,10 @@
 # under the License.
 """Tests for Ceilometer notify daemon."""
 
+import fixtures
 import mock
-from oslo_config import cfg
-from oslo_config import fixture as fixture_config
 import oslo_messaging
 from oslo_utils import fileutils
-from oslotest import mockpatch
 import six
 import yaml
 
@@ -27,6 +25,7 @@ from ceilometer.event import endpoint as event_endpoint
 from ceilometer import pipeline
 from ceilometer import publisher
 from ceilometer.publisher import test
+from ceilometer import service
 from ceilometer.tests import base as tests_base
 
 
@@ -82,16 +81,13 @@ TEST_NOTICE_PAYLOAD = {
 }
 
 
-cfg.CONF.import_opt('store_events', 'ceilometer.notification',
-                    group='notification')
-
-
 class TestEventEndpoint(tests_base.BaseTestCase):
 
-    def get_publisher(self, url, namespace=''):
+    @staticmethod
+    def get_publisher(conf, url, namespace=''):
         fake_drivers = {'test://': test.TestPublisher,
                         'except://': test.TestPublisher}
-        return fake_drivers[url](url)
+        return fake_drivers[url](conf, url)
 
     def _setup_pipeline(self, publishers):
         ev_pipeline = yaml.dump({
@@ -113,7 +109,7 @@ class TestEventEndpoint(tests_base.BaseTestCase):
         self.CONF.set_override('event_pipeline_cfg_file',
                                ev_pipeline_cfg_file)
 
-        ev_pipeline_mgr = pipeline.setup_event_pipeline()
+        ev_pipeline_mgr = pipeline.setup_event_pipeline(self.CONF)
         return ev_pipeline_mgr
 
     def _setup_endpoint(self, publishers):
@@ -127,16 +123,15 @@ class TestEventEndpoint(tests_base.BaseTestCase):
 
     def setUp(self):
         super(TestEventEndpoint, self).setUp()
-        self.CONF = self.useFixture(fixture_config.Config()).conf
-        self.CONF([])
+        self.CONF = service.prepare_service([], [])
         self.CONF.set_override("connection", "log://", group='database')
-        self.CONF.set_override("store_events", True, group="notification")
         self.setup_messaging(self.CONF)
 
-        self.useFixture(mockpatch.PatchObject(publisher, 'get_publisher',
-                                              side_effect=self.get_publisher))
+        self.useFixture(fixtures.MockPatchObject(
+            publisher, 'get_publisher',
+            side_effect=self.get_publisher))
         self.fake_publisher = mock.Mock()
-        self.useFixture(mockpatch.Patch(
+        self.useFixture(fixtures.MockPatch(
             'ceilometer.publisher.test.TestPublisher',
             return_value=self.fake_publisher))
 
@@ -175,7 +170,7 @@ class TestEventEndpoint(tests_base.BaseTestCase):
         with mock.patch("ceilometer.pipeline.LOG") as mock_logger:
             ret = self.endpoint.process_notification('info', [message])
             self.assertEqual(oslo_messaging.NotificationResult.REQUEUE, ret)
-            exception_mock = mock_logger.exception
+            exception_mock = mock_logger.error
             self.assertIn('Exit after error from publisher',
                           exception_mock.call_args_list[0][0][0])
 
@@ -195,6 +190,6 @@ class TestEventEndpoint(tests_base.BaseTestCase):
         with mock.patch("ceilometer.pipeline.LOG") as mock_logger:
             ret = self.endpoint.process_notification('info', [message])
             self.assertEqual(oslo_messaging.NotificationResult.HANDLED, ret)
-            exception_mock = mock_logger.exception
+            exception_mock = mock_logger.error
             self.assertIn('Continue after error from publisher',
                           exception_mock.call_args_list[0][0][0])

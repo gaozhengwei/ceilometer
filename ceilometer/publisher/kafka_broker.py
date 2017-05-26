@@ -19,7 +19,6 @@ from oslo_serialization import jsonutils
 from oslo_utils import netutils
 from six.moves.urllib import parse as urlparse
 
-from ceilometer.i18n import _LE
 from ceilometer.publisher import messaging
 
 LOG = log.getLogger(__name__)
@@ -62,8 +61,8 @@ class KafkaBrokerPublisher(messaging.MessagingPublisher):
     field. If max_retry is not specified, default the number of retry is 100.
     """
 
-    def __init__(self, parsed_url):
-        super(KafkaBrokerPublisher, self).__init__(parsed_url)
+    def __init__(self, conf, parsed_url):
+        super(KafkaBrokerPublisher, self).__init__(conf, parsed_url)
         options = urlparse.parse_qs(parsed_url.query)
 
         self._producer = None
@@ -77,10 +76,14 @@ class KafkaBrokerPublisher(messaging.MessagingPublisher):
             return
 
         try:
-            client = kafka.KafkaClient("%s:%s" % (self._host, self._port))
-            self._producer = kafka.SimpleProducer(client)
+            self._producer = kafka.KafkaProducer(
+                bootstrap_servers=["%s:%s" % (self._host, self._port)])
+        except kafka.errors.KafkaError as e:
+            LOG.exception("Failed to connect to Kafka service: %s", e)
+            raise messaging.DeliveryFailure('Kafka Client is not available, '
+                                            'please restart Kafka client')
         except Exception as e:
-            LOG.exception(_LE("Failed to connect to Kafka service: %s"), e)
+            LOG.exception("Failed to connect to Kafka service: %s", e)
             raise messaging.DeliveryFailure('Kafka Client is not available, '
                                             'please restart Kafka client')
 
@@ -91,6 +94,6 @@ class KafkaBrokerPublisher(messaging.MessagingPublisher):
         # application...
         try:
             for d in data:
-                self._producer.send_messages(self._topic, jsonutils.dumps(d))
+                self._producer.send(self._topic, jsonutils.dumps(d))
         except Exception as e:
             messaging.raise_delivery_failure(e)

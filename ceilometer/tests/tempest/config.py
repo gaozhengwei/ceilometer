@@ -16,14 +16,10 @@
 from oslo_config import cfg
 
 
-service_available_group = cfg.OptGroup(name="service_available",
-                                       title="Available OpenStack Services")
-
-ServiceAvailableGroup = [
-    cfg.BoolOpt('ceilometer',
-                default=True,
-                help="Whether or not Ceilometer is expected to be available"),
-]
+service_option = cfg.BoolOpt('ceilometer',
+                             default=True,
+                             help="Whether or not Ceilometer is expected to be"
+                                  "available")
 
 telemetry_group = cfg.OptGroup(name='telemetry',
                                title='Telemetry Service Options')
@@ -40,4 +36,20 @@ TelemetryGroup = [
     cfg.BoolOpt('event_enabled',
                 default=True,
                 help="Runs Ceilometer event-related tests"),
+    cfg.BoolOpt('deprecated_api_enabled',
+                default=True,
+                help="Runs Ceilometer deprecated API tests"),
+    cfg.IntOpt('notification_wait',
+               default=120,
+               help="The seconds to wait for notifications which "
+                    "containers and objects sent to swift."),
+    cfg.IntOpt('notification_sleep',
+               default=1,
+               help="The seconds to sleep after an unsuccessful "
+                    "notification received."),
+    cfg.IntOpt('alarm_granularity',
+               default=300,
+               help="Granularity to use for aodh alarms. This must match the "
+                    "configured Gnocchi archive policy")
+
 ]

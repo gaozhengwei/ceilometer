@@ -14,6 +14,7 @@
 
 import os
 import subprocess
+import time
 
 from oslo_utils import fileutils
 import six
@@ -24,7 +25,9 @@ from ceilometer.tests import base
 class BinTestCase(base.BaseTestCase):
     def setUp(self):
         super(BinTestCase, self).setUp()
-        content = ("[database]\n"
+        content = ("[DEFAULT]\n"
+                   "transport_url = fake://\n"
+                   "[database]\n"
                    "connection=log://localhost\n")
         if six.PY3:
             content = content.encode('utf-8')
@@ -36,8 +39,9 @@ class BinTestCase(base.BaseTestCase):
         super(BinTestCase, self).tearDown()
         os.remove(self.tempfile)
 
-    def test_dbsync_run(self):
-        subp = subprocess.Popen(['ceilometer-dbsync',
+    def test_upgrade_run(self):
+        subp = subprocess.Popen(['ceilometer-upgrade',
+                                 '--skip-gnocchi-resource-types',
                                  "--config-file=%s" % self.tempfile])
         self.assertEqual(0, subp.wait())
 
@@ -45,16 +49,16 @@ class BinTestCase(base.BaseTestCase):
         subp = subprocess.Popen(['ceilometer-expirer',
                                  '-d',
                                  "--config-file=%s" % self.tempfile],
-                                stderr=subprocess.PIPE)
-        __, err = subp.communicate()
+                                stdout=subprocess.PIPE)
+        stdout, __ = subp.communicate()
         self.assertEqual(0, subp.poll())
         self.assertIn(b"Nothing to clean, database metering "
-                      b"time to live is disabled", err)
-        self.assertIn(b"Nothing to clean, database event "
-                      b"time to live is disabled", err)
+                      b"time to live is disabled", stdout)
 
     def _test_run_expirer_ttl_enabled(self, ttl_name, data_name):
-        content = ("[database]\n"
+        content = ("[DEFAULT]\n"
+                   "transport_url = fake://\n"
+                   "[database]\n"
                    "%s=1\n"
                    "connection=log://localhost\n" % ttl_name)
         if six.PY3:
@@ -65,26 +69,27 @@ class BinTestCase(base.BaseTestCase):
         subp = subprocess.Popen(['ceilometer-expirer',
                                  '-d',
                                  "--config-file=%s" % self.tempfile],
-                                stderr=subprocess.PIPE)
-        __, err = subp.communicate()
+                                stdout=subprocess.PIPE)
+        stdout, __ = subp.communicate()
         self.assertEqual(0, subp.poll())
         msg = "Dropping %s data with TTL 1" % data_name
         if six.PY3:
             msg = msg.encode('utf-8')
-        self.assertIn(msg, err)
+        self.assertIn(msg, stdout)
 
     def test_run_expirer_ttl_enabled(self):
         self._test_run_expirer_ttl_enabled('metering_time_to_live',
                                            'metering')
         self._test_run_expirer_ttl_enabled('time_to_live', 'metering')
-        self._test_run_expirer_ttl_enabled('event_time_to_live', 'event')
 
 
 class BinSendSampleTestCase(base.BaseTestCase):
     def setUp(self):
         super(BinSendSampleTestCase, self).setUp()
-        pipeline_cfg_file = self.path_get('etc/ceilometer/pipeline.yaml')
+        pipeline_cfg_file = self.path_get(
+            'ceilometer/pipeline/data/pipeline.yaml')
         content = ("[DEFAULT]\n"
+                   "transport_url = fake://\n"
                    "pipeline_cfg_file={0}\n".format(pipeline_cfg_file))
         if six.PY3:
             content = content.encode('utf-8')
@@ -121,7 +126,9 @@ class BinCeilometerPollingServiceTestCase(base.BaseTestCase):
         super(BinCeilometerPollingServiceTestCase, self).tearDown()
 
     def test_starting_with_duplication_namespaces(self):
-        content = ("[database]\n"
+        content = ("[DEFAULT]\n"
+                   "transport_url = fake://\n"
+                   "[database]\n"
                    "connection=log://localhost\n")
         if six.PY3:
             content = content.encode('utf-8')
@@ -134,12 +141,20 @@ class BinCeilometerPollingServiceTestCase(base.BaseTestCase):
                                       "compute",
                                       "compute"],
                                      stderr=subprocess.PIPE)
-        out = self.subp.stderr.read(1024)
-        self.assertIn(b'Duplicated values: [\'compute\', \'compute\'] '
-                      b'found in CLI options, auto de-duplicated', out)
+        expected = (b'Duplicated values: [\'compute\', \'compute\'] '
+                    b'found in CLI options, auto de-duplicated')
+        # NOTE(gordc): polling process won't quit so wait for a bit and check
+        start = time.time()
+        while time.time() - start < 5:
+            output = self.subp.stderr.readline()
+            if expected in output:
+                break
+        else:
+            self.fail('Did not detect expected warning: %s' % expected)
 
     def test_polling_namespaces_invalid_value_in_config(self):
         content = ("[DEFAULT]\n"
+                   "transport_url = fake://\n"
                    "polling_namespaces = ['central']\n"
                    "[database]\n"
                    "connection=log://localhost\n")

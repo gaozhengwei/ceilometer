@@ -23,7 +23,6 @@ import oslo_messaging
 import six
 from stevedore import extension
 
-from ceilometer.i18n import _LE
 from ceilometer import messaging
 
 LOG = log.getLogger(__name__)
@@ -117,7 +116,7 @@ class NotificationBase(PluginBase):
                     priority, notification)
                 self.to_samples_and_publish(notification)
             except Exception:
-                LOG.error(_LE('Fail to process notification'), exc_info=True)
+                LOG.error('Fail to process notification', exc_info=True)
 
     def to_samples_and_publish(self, notification):
         """Return samples produced by *process_notification*.
@@ -128,16 +127,6 @@ class NotificationBase(PluginBase):
         """
         with self.manager.publisher() as p:
             p(list(self.process_notification(notification)))
-
-
-class NonMetricNotificationBase(object):
-    """Use to mark non-measurement meters
-
-    There are a number of historical non-measurement meters that should really
-    be captured as events. This common base allows us to disable these invalid
-    meters.
-    """
-    pass
 
 
 class ExtensionLoadError(Exception):
@@ -175,8 +164,9 @@ class PollsterBase(PluginBase):
         """
         pass
 
-    def __init__(self):
+    def __init__(self, conf):
         super(PollsterBase, self).__init__()
+        self.conf = conf
         try:
             self.setup_environment()
         except Exception as err:
@@ -214,7 +204,7 @@ class PollsterBase(PluginBase):
         """
 
     @classmethod
-    def build_pollsters(cls):
+    def build_pollsters(cls, conf):
         """Return a list of tuple (name, pollster).
 
         The name is the meter name which the pollster would return, the
@@ -225,7 +215,7 @@ class PollsterBase(PluginBase):
         return []
 
     @classmethod
-    def get_pollsters_extensions(cls):
+    def get_pollsters_extensions(cls, conf):
         """Return a list of stevedore extensions.
 
         The returned stevedore extensions wrap the pollster object instances
@@ -233,7 +223,7 @@ class PollsterBase(PluginBase):
         """
         extensions = []
         try:
-            for name, pollster in cls.build_pollsters():
+            for name, pollster in cls.build_pollsters(conf):
                 ext = extension.Extension(name, None, cls, pollster)
                 extensions.append(ext)
         except Exception as err:
@@ -245,6 +235,9 @@ class PollsterBase(PluginBase):
 class DiscoveryBase(object):
     KEYSTONE_REQUIRED_FOR_SERVICE = None
     """Service type required in keystone catalog to works"""
+
+    def __init__(self, conf):
+        self.conf = conf
 
     @abc.abstractmethod
     def discover(self, manager, param=None):

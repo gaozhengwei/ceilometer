@@ -15,17 +15,12 @@
 
 import abc
 
-from oslo_config import cfg
 from oslo_log import log
 import requests
 from requests import auth
 import six
 
 from ceilometer.i18n import _
-
-
-CONF = cfg.CONF
-CONF.import_opt('http_timeout', 'ceilometer.service')
 
 
 LOG = log.getLogger(__name__)
@@ -156,23 +151,23 @@ class HostTrackerAPIClient(_Base):
 
 class Client(object):
 
-    def __init__(self, endpoint, params):
+    def __init__(self, conf, endpoint, params):
         self.statistics = StatisticsAPIClient(self)
         self.topology = TopologyAPIClient(self)
         self.switch_manager = SwitchManagerAPIClient(self)
         self.host_tracker = HostTrackerAPIClient(self)
 
         self._endpoint = endpoint
+        self.conf = conf
 
         self._req_params = self._get_req_params(params)
 
-    @staticmethod
-    def _get_req_params(params):
+    def _get_req_params(self, params):
         req_params = {
             'headers': {
                 'Accept': 'application/json'
             },
-            'timeout': CONF.http_timeout,
+            'timeout': self.conf.http_timeout,
         }
 
         auth_way = params.get('auth')
@@ -199,8 +194,7 @@ class Client(object):
             else:
                 curl_command.append('--digest ')
 
-            curl_command.append('--user "%s":"%s" ' % (auth_class.username,
-                                                       auth_class.password))
+            curl_command.append('--user "%s":"***" ' % auth_class.username)
 
         for name, value in six.iteritems(self._req_params['headers']):
             curl_command.append('-H "%s: %s" ' % (name, value))
@@ -222,10 +216,10 @@ class Client(object):
         LOG.debug(''.join(dump))
 
     def _http_request(self, url):
-        if CONF.debug:
+        if self.conf.debug:
             self._log_req(url)
         resp = requests.get(url, **self._req_params)
-        if CONF.debug:
+        if self.conf.debug:
             self._log_res(resp)
         if resp.status_code // 100 != 2:
             raise OpenDaylightRESTAPIFailed(

@@ -14,9 +14,11 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import fixtures
 import mock
-from oslotest import mockpatch
 
+from ceilometer.compute.virt import inspector as virt_inspector
+from ceilometer import service
 import ceilometer.tests.base as base
 
 
@@ -24,6 +26,7 @@ class TestPollsterBase(base.BaseTestCase):
 
     def setUp(self):
         super(TestPollsterBase, self).setUp()
+        self.CONF = service.prepare_service([], [])
 
         self.inspector = mock.Mock()
         self.instance = mock.MagicMock()
@@ -42,16 +45,27 @@ class TestPollsterBase(base.BaseTestCase):
             'metering.stack': '2cadc4b4-8789-123c-b4eg-edd2f0a9c128',
             'project_cos': 'dev'}
 
-        patch_virt = mockpatch.Patch(
+        self.useFixture(fixtures.MockPatch(
             'ceilometer.compute.virt.inspector.get_hypervisor_inspector',
-            new=mock.Mock(return_value=self.inspector))
-        self.useFixture(patch_virt)
+            new=mock.Mock(return_value=self.inspector)))
 
         # as we're having lazy hypervisor inspector singleton object in the
         # base compute pollster class, that leads to the fact that we
         # need to mock all this class property to avoid context sharing between
         # the tests
-        patch_inspector = mockpatch.Patch(
-            'ceilometer.compute.pollsters.BaseComputePollster.inspector',
-            self.inspector)
-        self.useFixture(patch_inspector)
+        self.useFixture(fixtures.MockPatch(
+            'ceilometer.compute.pollsters.'
+            'GenericComputePollster._get_inspector',
+            return_value=self.inspector))
+
+    def _mock_inspect_instance(self, *data):
+        next_value = iter(data)
+
+        def inspect(instance, duration):
+            value = next(next_value)
+            if isinstance(value, virt_inspector.InstanceStats):
+                return value
+            else:
+                raise value
+
+        self.inspector.inspect_instance = mock.Mock(side_effect=inspect)

@@ -23,15 +23,14 @@ import uuid
 
 from gabbi import fixture
 from oslo_config import cfg
-from oslo_config import fixture as fixture_config
-from oslo_policy import opts
 from oslo_utils import fileutils
 import six
 from six.moves.urllib import parse as urlparse
 
-from ceilometer.event.storage import models
+from ceilometer.api import app
 from ceilometer.publisher import utils
 from ceilometer import sample
+from ceilometer import service
 from ceilometer import storage
 
 # TODO(chdent): For now only MongoDB is supported, because of easy
@@ -39,12 +38,25 @@ from ceilometer import storage
 # data store.
 ENGINES = ['mongodb']
 
+# NOTE(chdent): Hack to restore semblance of global configuration to
+# pass to the WSGI app used per test suite. LOAD_APP_KWARGS are the olso
+# configuration, and the pecan application configuration of
+# which the critical part is a reference to the current indexer.
+LOAD_APP_KWARGS = None
+
+
+def setup_app():
+    global LOAD_APP_KWARGS
+    return app.load_app(**LOAD_APP_KWARGS)
+
 
 class ConfigFixture(fixture.GabbiFixture):
     """Establish the relevant configuration for a test run."""
 
     def start_fixture(self):
         """Set up config."""
+
+        global LOAD_APP_KWARGS
 
         self.conf = None
 
@@ -58,13 +70,7 @@ class ConfigFixture(fixture.GabbiFixture):
         if engine not in ENGINES:
             raise case.SkipTest('Database engine not supported')
 
-        conf = fixture_config.Config().conf
-        self.conf = conf
-        self.conf([], project='ceilometer', validate_default_values=True)
-        opts.set_defaults(self.conf)
-        conf.import_group('api', 'ceilometer.api.controllers.v2.root')
-        conf.import_opt('store_events', 'ceilometer.notification',
-                        group='notification')
+        self.conf = service.prepare_service([], [])
 
         content = ('{"default": ""}')
         if six.PY3:
@@ -73,28 +79,30 @@ class ConfigFixture(fixture.GabbiFixture):
                                                     prefix='policy',
                                                     suffix='.json')
 
-        conf.set_override("policy_file", self.tempfile,
-                          group='oslo_policy')
-        conf.set_override(
+        self.conf.set_override("policy_file", self.tempfile,
+                               group='oslo_policy')
+        self.conf.set_override(
             'api_paste_config',
             os.path.abspath(
                 'ceilometer/tests/functional/gabbi/gabbi_paste.ini')
         )
 
         # A special pipeline is required to use the direct publisher.
-        conf.set_override('pipeline_cfg_file',
-                          'ceilometer/tests/functional/gabbi_pipeline.yaml')
+        self.conf.set_override(
+            'pipeline_cfg_file',
+            'ceilometer/tests/functional/gabbi_pipeline.yaml')
 
         database_name = '%s-%s' % (db_url, str(uuid.uuid4()))
-        conf.set_override('connection', database_name, group='database')
-        conf.set_override('metering_connection', '', group='database')
-        conf.set_override('event_connection', '', group='database')
+        self.conf.set_override('connection', database_name, group='database')
+        self.conf.set_override('metering_connection', '', group='database')
 
-        conf.set_override('pecan_debug', True, group='api')
-        conf.set_override('gnocchi_is_enabled', False, group='api')
-        conf.set_override('aodh_is_enabled', False, group='api')
+        self.conf.set_override('gnocchi_is_enabled', False, group='api')
+        self.conf.set_override('aodh_is_enabled', False, group='api')
+        self.conf.set_override('panko_is_enabled', False, group='api')
 
-        conf.set_override('store_events', True, group='notification')
+        LOAD_APP_KWARGS = {
+            'conf': self.conf,
+        }
 
     def stop_fixture(self):
         """Reset the config and remove data."""
@@ -108,7 +116,8 @@ class SampleDataFixture(fixture.GabbiFixture):
 
     def start_fixture(self):
         """Create some samples."""
-        conf = fixture_config.Config().conf
+        global LOAD_APP_KWARGS
+        conf = LOAD_APP_KWARGS['conf']
         self.conn = storage.get_connection_from_config(conf)
         timestamp = datetime.datetime.utcnow()
         project_id = str(uuid.uuid4())
@@ -138,32 +147,6 @@ class SampleDataFixture(fixture.GabbiFixture):
         print('resource',
               self.conn.db.resource.remove({'source': self.source}))
         print('meter', self.conn.db.meter.remove({'source': self.source}))
-
-
-class EventDataFixture(fixture.GabbiFixture):
-    """Instantiate some sample event data for use in testing."""
-
-    def start_fixture(self):
-        """Create some events."""
-        conf = fixture_config.Config().conf
-        self.conn = storage.get_connection_from_config(conf, 'event')
-        events = []
-        name_list = ['chocolate.chip', 'peanut.butter', 'sugar']
-        for ix, name in enumerate(name_list):
-            timestamp = datetime.datetime.utcnow()
-            message_id = 'fea1b15a-1d47-4175-85a5-a4bb2c72924{}'.format(ix)
-            traits = [models.Trait('type', 1, name),
-                      models.Trait('ate', 2, ix)]
-            event = models.Event(message_id,
-                                 'cookies_{}'.format(name),
-                                 timestamp,
-                                 traits, {'nested': {'inside': 'value'}})
-            events.append(event)
-        self.conn.record_events(events)
-
-    def stop_fixture(self):
-        """Destroy the events."""
-        self.conn.db.event.remove({'event_type': '/^cookies_/'})
 
 
 class CORSConfigFixture(fixture.GabbiFixture):

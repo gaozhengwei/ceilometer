@@ -13,16 +13,14 @@
 """Tests for ceilometer.meter.notifications
 """
 import copy
+import fixtures
 import mock
-import os
 import six
 import yaml
 
-from oslo_config import fixture as fixture_config
 from oslo_utils import encodeutils
 from oslo_utils import fileutils
 
-import ceilometer
 from ceilometer import declarative
 from ceilometer.meter import notifications
 from ceilometer import service as ceilometer_service
@@ -41,6 +39,28 @@ NOTIFICATION = {
                 u'source': u'30be1fc9a03c4e94ab05c403a8a377f2: openstack',
                 u'volume': 1.0,
                 u'project_id': u'30be1fc9a03c4e94ab05c403a8a377f2',
+                },
+    u'_context_tenant': u'30be1fc9a03c4e94ab05c403a8a377f2',
+    u'_context_request_id': u'req-da91b4bf-d2b5-43ae-8b66-c7752e72726d',
+    u'_context_user': u'e1d870e51c7340cb9d555b15cbfcaec2',
+    'message_id': u'939823de-c242-45a2-a399-083f4d6a8c3e',
+    'publisher_id': "foo123"
+}
+
+USER_META = {
+    'event_type': u'test.create',
+    'timestamp': u'2015-06-1909: 19: 35.786893',
+    'payload': {u'user_id': u'e1d870e51c7340cb9d555b15cbfcaec2',
+                u'resource_id': u'bea70e51c7340cb9d555b15cbfcaec23',
+                u'timestamp': u'2015-06-19T09:19:35.785330',
+                u'created_at': u'2015-06-19T09:25:35.785330',
+                u'launched_at': u'2015-06-19T09:25:40.785330',
+                u'message_signature': u'fake_signature1',
+                u'resource_metadata': {u'foo': u'bar'},
+                u'source': u'30be1fc9a03c4e94ab05c403a8a377f2: openstack',
+                u'volume': 1.0,
+                u'project_id': u'30be1fc9a03c4e94ab05c403a8a377f2',
+                u'metadata': {u'metering.xyz': u'abc', u'ignore': u'this'},
                 },
     u'_context_tenant': u'30be1fc9a03c4e94ab05c403a8a377f2',
     u'_context_request_id': u'req-da91b4bf-d2b5-43ae-8b66-c7752e72726d',
@@ -228,7 +248,7 @@ class TestMeterDefinition(test.BaseTestCase):
                    volume="$.payload.volume",
                    resource_id="$.payload.resource_id",
                    project_id="$.payload.project_id")
-        handler = notifications.MeterDefinition(cfg, mock.Mock())
+        handler = notifications.MeterDefinition(cfg, mock.Mock(), mock.Mock())
         self.assertTrue(handler.match_type("test.create"))
         sample = list(handler.to_samples(NOTIFICATION))[0]
         self.assertEqual(1.0, sample["volume"])
@@ -240,7 +260,7 @@ class TestMeterDefinition(test.BaseTestCase):
     def test_config_required_missing_fields(self):
         cfg = dict()
         try:
-            notifications.MeterDefinition(cfg, mock.Mock())
+            notifications.MeterDefinition(cfg, mock.Mock(), mock.Mock())
         except declarative.DefinitionException as e:
             self.assertIn("Required fields ['name', 'type', 'event_type',"
                           " 'unit', 'volume', 'resource_id']"
@@ -252,7 +272,7 @@ class TestMeterDefinition(test.BaseTestCase):
                    unit="foo", volume="bar",
                    resource_id="bea70e51c7340cb9d555b15cbfcaec23")
         try:
-            notifications.MeterDefinition(cfg, mock.Mock())
+            notifications.MeterDefinition(cfg, mock.Mock(), mock.Mock())
         except declarative.DefinitionException as e:
             self.assertIn("Invalid type foo specified",
                           encodeutils.exception_to_unicode(e))
@@ -262,31 +282,25 @@ class TestMeterProcessing(test.BaseTestCase):
 
     def setUp(self):
         super(TestMeterProcessing, self).setUp()
-        self.CONF = self.useFixture(fixture_config.Config()).conf
-        ceilometer_service.prepare_service(argv=[], config_files=[])
-        self.handler = notifications.ProcessMeterNotifications(mock.Mock())
+        self.CONF = ceilometer_service.prepare_service([], [])
+        self.path = self.useFixture(fixtures.TempDir()).path
+        self.handler = notifications.ProcessMeterNotifications(
+            mock.Mock(conf=self.CONF))
 
-    def test_fallback_meter_path(self):
-        self.CONF.set_override('meter_definitions_cfg_file',
-                               '/not/existing/path', group='meter')
-        with mock.patch('ceilometer.declarative.open',
-                        mock.mock_open(read_data='---\nmetric: []'),
-                        create=True) as mock_open:
-            self.handler._load_definitions()
+    def _load_meter_def_file(self, cfgs=None):
+        self.CONF.set_override('meter_definitions_dirs',
+                               [self.path], group='meter')
+        cfgs = cfgs or []
+        if not isinstance(cfgs, list):
+            cfgs = [cfgs]
+        meter_cfg_files = list()
+        for cfg in cfgs:
             if six.PY3:
-                path = os.path.dirname(ceilometer.__file__)
-            else:
-                path = "ceilometer"
-            mock_open.assert_called_with(path + "/meter/data/meters.yaml")
-
-    def _load_meter_def_file(self, cfg):
-        if six.PY3:
-            cfg = cfg.encode('utf-8')
-        meter_cfg_file = fileutils.write_to_tempfile(content=cfg,
-                                                     prefix="meters",
-                                                     suffix="yaml")
-        self.CONF.set_override('meter_definitions_cfg_file',
-                               meter_cfg_file, group='meter')
+                cfg = cfg.encode('utf-8')
+            meter_cfg_files.append(fileutils.write_to_tempfile(content=cfg,
+                                                               path=self.path,
+                                                               prefix="meters",
+                                                               suffix=".yaml"))
         self.handler.definitions = self.handler._load_definitions()
 
     @mock.patch('ceilometer.meter.notifications.LOG')
@@ -491,6 +505,41 @@ class TestMeterProcessing(test.BaseTestCase):
         s1 = c[0].as_dict()
         meta = {'proj': s1['project_id'],
                 'dict': NOTIFICATION['payload']['resource_metadata']}
+        self.assertEqual(meta, s1['resource_metadata'])
+
+    def test_user_meta(self):
+        cfg = yaml.dump(
+            {'metric': [dict(name="test1",
+                        event_type="test.*",
+                        type="delta",
+                        unit="B",
+                        volume="$.payload.volume",
+                        resource_id="$.payload.resource_id",
+                        project_id="$.payload.project_id",
+                        user_metadata="$.payload.metadata",)]})
+        self._load_meter_def_file(cfg)
+        c = list(self.handler.process_notification(USER_META))
+        self.assertEqual(1, len(c))
+        s1 = c[0].as_dict()
+        meta = {'user_metadata': {'xyz': 'abc'}}
+        self.assertEqual(meta, s1['resource_metadata'])
+
+    def test_user_meta_and_custom(self):
+        cfg = yaml.dump(
+            {'metric': [dict(name="test1",
+                        event_type="test.*",
+                        type="delta",
+                        unit="B",
+                        volume="$.payload.volume",
+                        resource_id="$.payload.resource_id",
+                        project_id="$.payload.project_id",
+                        user_metadata="$.payload.metadata",
+                        metadata={'proj': '$.payload.project_id'})]})
+        self._load_meter_def_file(cfg)
+        c = list(self.handler.process_notification(USER_META))
+        self.assertEqual(1, len(c))
+        s1 = c[0].as_dict()
+        meta = {'user_metadata': {'xyz': 'abc'}, 'proj': s1['project_id']}
         self.assertEqual(meta, s1['resource_metadata'])
 
     def test_multi_match_event_meter(self):
@@ -712,3 +761,129 @@ class TestMeterProcessing(test.BaseTestCase):
         self._load_meter_def_file(cfg)
         c = list(self.handler.process_notification(NOTIFICATION))
         self.assertEqual(1, len(c))
+
+    def test_multi_files_multi_meters(self):
+        cfg1 = yaml.dump(
+            {'metric': [dict(name="test1",
+                             event_type="test.create",
+                             type="delta",
+                             unit="B",
+                             volume="$.payload.volume",
+                             resource_id="$.payload.resource_id",
+                             project_id="$.payload.project_id")]})
+        cfg2 = yaml.dump(
+            {'metric': [dict(name="test2",
+                             event_type="test.create",
+                             type="delta",
+                             unit="B",
+                             volume="$.payload.volume",
+                             resource_id="$.payload.resource_id",
+                             project_id="$.payload.project_id")]})
+        self._load_meter_def_file([cfg1, cfg2])
+        data = list(self.handler.process_notification(NOTIFICATION))
+        self.assertEqual(2, len(data))
+        expected_names = ['test1', 'test2']
+        for s in data:
+            self.assertIn(s.as_dict()['name'], expected_names)
+
+    def test_multi_files_duplicate_meter(self):
+        cfg1 = yaml.dump(
+            {'metric': [dict(name="test",
+                             event_type="test.create",
+                             type="delta",
+                             unit="B",
+                             volume="$.payload.volume",
+                             resource_id="$.payload.resource_id",
+                             project_id="$.payload.project_id")]})
+        cfg2 = yaml.dump(
+            {'metric': [dict(name="test",
+                             event_type="test.create",
+                             type="delta",
+                             unit="B",
+                             volume="$.payload.volume",
+                             resource_id="$.payload.resource_id",
+                             project_id="$.payload.project_id")]})
+        self._load_meter_def_file([cfg1, cfg2])
+        data = list(self.handler.process_notification(NOTIFICATION))
+        self.assertEqual(1, len(data))
+        self.assertEqual(data[0].as_dict()['name'], 'test')
+
+    def test_multi_files_empty_payload(self):
+        event = copy.deepcopy(MIDDLEWARE_EVENT)
+        del event['payload']['measurements']
+        cfg1 = yaml.dump(
+            {'metric': [dict(name="$.payload.measurements.[*].metric.[*].name",
+                             event_type="objectstore.http.request",
+                             type="delta",
+                             unit="$.payload.measurements.[*].metric.[*].unit",
+                             volume="$.payload.measurements.[*].result",
+                             resource_id="$.payload.target_id",
+                             project_id="$.payload.initiator.project_id",
+                             lookup="name")]})
+        cfg2 = yaml.dump(
+            {'metric': [dict(name="$.payload.measurements.[*].metric.[*].name",
+                             event_type="objectstore.http.request",
+                             type="delta",
+                             unit="$.payload.measurements.[*].metric.[*].unit",
+                             volume="$.payload.measurements.[*].result",
+                             resource_id="$.payload.target_id",
+                             project_id="$.payload.initiator.project_id",
+                             lookup="name")]})
+        self._load_meter_def_file([cfg1, cfg2])
+        data = list(self.handler.process_notification(event))
+        self.assertEqual(0, len(data))
+
+    def test_multi_files_unmatched_meter(self):
+        cfg1 = yaml.dump(
+            {'metric': [dict(name="test1",
+                             event_type="test.create",
+                             type="delta",
+                             unit="B",
+                             volume="$.payload.volume",
+                             resource_id="$.payload.resource_id",
+                             project_id="$.payload.project_id")]})
+        cfg2 = yaml.dump(
+            {'metric': [dict(name="test2",
+                        event_type="test.update",
+                        type="delta",
+                        unit="B",
+                        volume="$.payload.volume",
+                        resource_id="$.payload.resource_id",
+                        project_id="$.payload.project_id")]})
+        self._load_meter_def_file([cfg1, cfg2])
+        data = list(self.handler.process_notification(NOTIFICATION))
+        self.assertEqual(1, len(data))
+        self.assertEqual(data[0].as_dict()['name'], 'test1')
+
+    @mock.patch('ceilometer.meter.notifications.LOG')
+    def test_multi_files_bad_meter(self, LOG):
+        cfg1 = yaml.dump(
+            {'metric': [dict(name="test1",
+                             event_type="test.create",
+                             type="delta",
+                             unit="B",
+                             volume="$.payload.volume",
+                             resource_id="$.payload.resource_id",
+                             project_id="$.payload.project_id"),
+                        dict(name="bad_test",
+                             type="bad_type",
+                             event_type="bar.create",
+                             unit="foo", volume="bar",
+                             resource_id="bea70e51c7340cb9d555b15cbfcaec23")]})
+        cfg2 = yaml.dump(
+            {'metric': [dict(name="test2",
+                             event_type="test.create",
+                             type="delta",
+                             unit="B",
+                             volume="$.payload.volume",
+                             resource_id="$.payload.resource_id",
+                             project_id="$.payload.project_id")]})
+        self._load_meter_def_file([cfg1, cfg2])
+        data = list(self.handler.process_notification(NOTIFICATION))
+        self.assertEqual(2, len(data))
+        expected_names = ['test1', 'test2']
+        for s in data:
+            self.assertIn(s.as_dict()['name'], expected_names)
+        args, kwargs = LOG.error.call_args_list[0]
+        self.assertEqual("Error loading meter definition: %s", args[0])
+        self.assertTrue(args[1].endswith("Invalid type bad_type specified"))

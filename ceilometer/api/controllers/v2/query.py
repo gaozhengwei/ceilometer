@@ -313,7 +313,7 @@ class ValidatedComplexQuery(object):
             date_time = date_time.replace(tzinfo=None)
             return date_time
         except ValueError:
-            LOG.exception(_("String %s is not a valid isotime") % isotime)
+            LOG.exception("String %s is not a valid isotime" % isotime)
             msg = _('Failed to parse the timestamp value %s') % isotime
             raise base.ClientSideError(msg)
 

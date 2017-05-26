@@ -3,10 +3,6 @@
 enable_service ceilometer-acompute ceilometer-acentral
 # Notification Agent
 enable_service ceilometer-anotification
-# Data Collector
-enable_service ceilometer-collector
-# API service
-enable_service ceilometer-api
 
 # Default directories
 CEILOMETER_DIR=$DEST/ceilometer
@@ -15,11 +11,17 @@ CEILOMETER_CONF=$CEILOMETER_CONF_DIR/ceilometer.conf
 CEILOMETER_AUTH_CACHE_DIR=${CEILOMETER_AUTH_CACHE_DIR:-/var/cache/ceilometer}
 CEILOMETER_WSGI_DIR=${CEILOMETER_WSGI_DIR:-/var/www/ceilometer}
 
-# Set up database backend
-CEILOMETER_BACKEND=${CEILOMETER_BACKEND:-mysql}
+# Set up no backend
+CEILOMETER_BACKEND=${CEILOMETER_BACKEND:-none}
+if [ "$CEILOMETER_BACKEND" = "es" ] || [ "$CEILOMETER_BACKEND" = "mysql" ] || [ "$CEILOMETER_BACKEND" = "postgresql" ] || [ "$CEILOMETER_BACKEND" = "mongodb" ]; then
+    enable_service ceilometer-api
+fi
 
 # Gnocchi default archive_policy for Ceilometer
 GNOCCHI_ARCHIVE_POLICY=${GNOCCHI_ARCHIVE_POLICY:-low}
+# FIXME(sileht): put 300 by default to match the archive policy
+# when the gate job have overrided this.
+CEILOMETER_ALARM_GRANULARITY=${CEILOMETER_ALARM_GRANULARITY:-60}
 
 # Ceilometer connection info.
 CEILOMETER_SERVICE_PROTOCOL=http
@@ -29,7 +31,6 @@ CEILOMETER_USE_MOD_WSGI=${CEILOMETER_USE_MOD_WSGI:-${ENABLE_HTTPD_MOD_WSGI_SERVI
 
 # To enable OSprofiler change value of this variable to "notifications,profiler"
 CEILOMETER_NOTIFICATION_TOPICS=${CEILOMETER_NOTIFICATION_TOPICS:-notifications}
-CEILOMETER_EVENTS=${CEILOMETER_EVENTS:-True}
 
 CEILOMETER_COORDINATION_URL=${CEILOMETER_COORDINATION_URL:-redis://localhost:6379}
 CEILOMETER_PIPELINE_INTERVAL=${CEILOMETER_PIPELINE_INTERVAL:-}
@@ -49,6 +50,36 @@ GITREPO["python-ceilometerclient"]=${CEILOMETERCLIENT_REPO:-${GIT_BASE}/openstac
 GITBRANCH["python-ceilometerclient"]=${CEILOMETERCLIENT_BRANCH:-master}
 GITDIR["python-ceilometerclient"]=$DEST/python-ceilometerclient
 GITDIR["ceilometermiddleware"]=$DEST/ceilometermiddleware
+
+# Make sure gnocchi and panko plugin is enabled before ceilometer
+function _ceilometer_check_for_storage  {
+    local plugins="${DEVSTACK_PLUGINS}"
+    local plugin
+
+    if [ "$CEILOMETER_BACKEND" == 'gnocchi' ]; then
+        local seen_gnocchi=False
+
+        for plugin in ${plugins//,/ }; do
+            if [ "$plugin" == 'gnocchi' ]; then
+                seen_gnocchi=True
+            elif [ "$plugin" == 'ceilometer' ] && [ "$seen_gnocchi" == 'False' ]; then
+                die $LINENO "gnocchi must be enabled before ceilometer!"
+            fi
+        done
+    fi
+
+    local seen_ceilometer=False
+
+    for plugin in ${plugins//,/ }; do
+        if [ "$plugin" == 'ceilometer' ]; then
+             seen_ceilometer=True
+        elif [ "$plugin" == 'panko' ] && [[ "$seen_ceilometer" == 'True' ]]; then
+             die $LINENO "Panko must be enabled before ceilometer!"
+        fi
+    done
+}
+
+_ceilometer_check_for_storage
 
 # Get rid of this before done.
 # Tell emacs to use shell-script-mode

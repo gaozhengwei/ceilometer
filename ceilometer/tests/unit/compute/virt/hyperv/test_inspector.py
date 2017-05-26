@@ -24,6 +24,7 @@ from oslotest import base
 
 from ceilometer.compute.virt.hyperv import inspector as hyperv_inspector
 from ceilometer.compute.virt import inspector as virt_inspector
+from ceilometer import service
 
 
 class TestHyperVInspection(base.BaseTestCase):
@@ -32,7 +33,8 @@ class TestHyperVInspection(base.BaseTestCase):
     @mock.patch.object(hyperv_inspector.HyperVInspector,
                        '_compute_host_max_cpu_clock')
     def setUp(self, mock_compute_host_cpu_clock):
-        self._inspector = hyperv_inspector.HyperVInspector()
+        conf = service.prepare_service([], [])
+        self._inspector = hyperv_inspector.HyperVInspector(conf)
         self._inspector._utils = mock.MagicMock()
 
         super(TestHyperVInspection, self).setUp()
@@ -41,17 +43,20 @@ class TestHyperVInspection(base.BaseTestCase):
         self._inspector._utils.get_cpu_metrics.side_effect = (
             os_win_exc.OSWinException)
         self.assertRaises(virt_inspector.InspectorException,
-                          self._inspector.inspect_cpus, mock.sentinel.instance)
+                          self._inspector.inspect_instance,
+                          mock.sentinel.instance, None)
 
         self._inspector._utils.get_cpu_metrics.side_effect = (
             os_win_exc.HyperVException)
         self.assertRaises(virt_inspector.InspectorException,
-                          self._inspector.inspect_cpus, mock.sentinel.instance)
+                          self._inspector.inspect_instance,
+                          mock.sentinel.instance, None)
 
         self._inspector._utils.get_cpu_metrics.side_effect = (
             os_win_exc.NotFound(resource='foofoo'))
         self.assertRaises(virt_inspector.InstanceNotFoundException,
-                          self._inspector.inspect_cpus, mock.sentinel.instance)
+                          self._inspector.inspect_instance,
+                          mock.sentinel.instance, None)
 
     def test_assert_original_traceback_maintained(self):
         def bar(self):
@@ -60,7 +65,7 @@ class TestHyperVInspection(base.BaseTestCase):
 
         self._inspector._utils.get_cpu_metrics.side_effect = bar
         try:
-            self._inspector.inspect_cpus(mock.sentinel.instance)
+            self._inspector.inspect_instance(mock.sentinel.instance, None)
             self.fail("Test expected exception, but it was not raised.")
         except virt_inspector.InstanceNotFoundException:
             # exception has been raised as expected.
@@ -81,7 +86,7 @@ class TestHyperVInspection(base.BaseTestCase):
         cpu_clock = self._inspector._compute_host_max_cpu_clock()
         self.assertEqual(2000.0, cpu_clock)
 
-    def test_inspect_cpus(self):
+    def test_inspect_instance(self):
         fake_instance_name = 'fake_instance_name'
         fake_cpu_clock_used = 2000
         fake_cpu_count = 3000
@@ -94,17 +99,13 @@ class TestHyperVInspection(base.BaseTestCase):
                          1000)
         self._inspector._utils.get_cpu_metrics.return_value = (
             fake_cpu_clock_used, fake_cpu_count, fake_uptime)
-
-        cpu_stats = self._inspector.inspect_cpus(fake_instance_name)
-
-        self.assertEqual(fake_cpu_count, cpu_stats.number)
-        self.assertEqual(fake_cpu_time, cpu_stats.time)
-
-    def test_inspect_memory_usage(self):
         fake_usage = self._inspector._utils.get_memory_metrics.return_value
-        usage = self._inspector.inspect_memory_usage(
-            mock.sentinel.FAKE_INSTANCE, mock.sentinel.FAKE_DURATION)
-        self.assertEqual(fake_usage, usage.usage)
+
+        stats = self._inspector.inspect_instance(fake_instance_name, None)
+
+        self.assertEqual(fake_cpu_count, stats.cpu_number)
+        self.assertEqual(fake_cpu_time, stats.cpu_time)
+        self.assertEqual(fake_usage, stats.memory_usage)
 
     def test_inspect_vnics(self):
         fake_instance_name = 'fake_instance_name'
@@ -120,16 +121,13 @@ class TestHyperVInspection(base.BaseTestCase):
             'address': fake_address}]
 
         inspected_vnics = list(self._inspector.inspect_vnics(
-            fake_instance_name))
+            fake_instance_name, None))
 
         self.assertEqual(1, len(inspected_vnics))
-        self.assertEqual(2, len(inspected_vnics[0]))
 
-        inspected_vnic, inspected_stats = inspected_vnics[0]
-
-        self.assertEqual(fake_element_name, inspected_vnic.name)
-        self.assertEqual(fake_address, inspected_vnic.mac)
-
+        inspected_stats = inspected_vnics[0]
+        self.assertEqual(fake_element_name, inspected_stats.name)
+        self.assertEqual(fake_address, inspected_stats.mac)
         self.assertEqual(fake_rx_mb * units.Mi, inspected_stats.rx_bytes)
         self.assertEqual(fake_tx_mb * units.Mi, inspected_stats.tx_bytes)
 
@@ -147,21 +145,18 @@ class TestHyperVInspection(base.BaseTestCase):
             'host_resource': fake_host_resource}]
 
         inspected_disks = list(self._inspector.inspect_disks(
-            fake_instance_name))
+            fake_instance_name, None))
 
         self.assertEqual(1, len(inspected_disks))
-        self.assertEqual(2, len(inspected_disks[0]))
 
-        inspected_disk, inspected_stats = inspected_disks[0]
-
-        self.assertEqual(fake_instance_id, inspected_disk.device)
-
+        inspected_stats = inspected_disks[0]
+        self.assertEqual(fake_instance_id, inspected_stats.device)
         self.assertEqual(fake_read_mb * units.Mi, inspected_stats.read_bytes)
         self.assertEqual(fake_write_mb * units.Mi, inspected_stats.write_bytes)
 
     def test_inspect_disk_latency(self):
         fake_instance_name = mock.sentinel.INSTANCE_NAME
-        fake_disk_latency = mock.sentinel.DISK_LATENCY
+        fake_disk_latency = 1000
         fake_instance_id = mock.sentinel.INSTANCE_ID
 
         self._inspector._utils.get_disk_latency_metrics.return_value = [{
@@ -169,19 +164,17 @@ class TestHyperVInspection(base.BaseTestCase):
             'instance_id': fake_instance_id}]
 
         inspected_disks = list(self._inspector.inspect_disk_latency(
-            fake_instance_name))
+            fake_instance_name, None))
 
         self.assertEqual(1, len(inspected_disks))
-        self.assertEqual(2, len(inspected_disks[0]))
 
-        inspected_disk, inspected_stats = inspected_disks[0]
-
-        self.assertEqual(fake_instance_id, inspected_disk.device)
-        self.assertEqual(fake_disk_latency, inspected_stats.disk_latency)
+        inspected_stats = inspected_disks[0]
+        self.assertEqual(fake_instance_id, inspected_stats.device)
+        self.assertEqual(1, inspected_stats.disk_latency)
 
     def test_inspect_disk_iops_count(self):
         fake_instance_name = mock.sentinel.INSTANCE_NAME
-        fake_disk_iops_count = mock.sentinel.DISK_IOPS_COUNT
+        fake_disk_iops_count = 53
         fake_instance_id = mock.sentinel.INSTANCE_ID
 
         self._inspector._utils.get_disk_iops_count.return_value = [{
@@ -189,12 +182,10 @@ class TestHyperVInspection(base.BaseTestCase):
             'instance_id': fake_instance_id}]
 
         inspected_disks = list(self._inspector.inspect_disk_iops(
-            fake_instance_name))
+            fake_instance_name, None))
 
         self.assertEqual(1, len(inspected_disks))
-        self.assertEqual(2, len(inspected_disks[0]))
 
-        inspected_disk, inspected_stats = inspected_disks[0]
-
-        self.assertEqual(fake_instance_id, inspected_disk.device)
-        self.assertEqual(fake_disk_iops_count, inspected_stats.iops_count)
+        inspected_stats = inspected_disks[0]
+        self.assertEqual(fake_instance_id, inspected_stats.device)
+        self.assertEqual(53, inspected_stats.iops_count)

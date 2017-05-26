@@ -13,9 +13,9 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 import mock
-from oslo_config import fixture as fixture_config
 
 from ceilometer import middleware
+from ceilometer import service
 from ceilometer.tests import base
 
 
@@ -69,7 +69,7 @@ class TestNotifications(base.BaseTestCase):
 
     def setUp(self):
         super(TestNotifications, self).setUp()
-        self.CONF = self.useFixture(fixture_config.Config()).conf
+        self.CONF = service.prepare_service([], [])
         self.setup_messaging(self.CONF)
 
     def test_process_request_notification(self):
@@ -97,4 +97,4 @@ class TestNotifications(base.BaseTestCase):
 
     def test_targets(self):
         targets = middleware.HTTPRequest(mock.Mock()).get_targets(self.CONF)
-        self.assertEqual(4, len(targets))
+        self.assertEqual(13, len(targets))

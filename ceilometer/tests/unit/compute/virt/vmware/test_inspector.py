@@ -22,67 +22,93 @@ from oslotest import base
 
 from ceilometer.compute.virt import inspector as virt_inspector
 from ceilometer.compute.virt.vmware import inspector as vsphere_inspector
+from ceilometer import service
 
 
 class TestVsphereInspection(base.BaseTestCase):
 
     def setUp(self):
+        super(TestVsphereInspection, self).setUp()
+        conf = service.prepare_service([], [])
         api_session = api.VMwareAPISession("test_server", "test_user",
                                            "test_password", 0, None,
                                            create_session=False, port=7443)
         vsphere_inspector.get_api_session = mock.Mock(
             return_value=api_session)
-        self._inspector = vsphere_inspector.VsphereInspector()
+        self._inspector = vsphere_inspector.VsphereInspector(conf)
         self._inspector._ops = mock.MagicMock()
 
-        super(TestVsphereInspection, self).setUp()
+    def test_instance_notFound(self):
+        test_vm_mobj = mock.MagicMock()
+        test_vm_mobj = None
+        ops_mock = self._inspector._ops
+        ops_mock.get_vm_mobj.return_value = test_vm_mobj
+        self.assertRaises(virt_inspector.InstanceNotFoundException,
+                          self._inspector._get_vm_mobj_not_power_off_or_raise,
+                          mock.MagicMock())
+
+    def test_instance_poweredOff(self):
+        test_vm_mobj = mock.MagicMock()
+        test_vm_mobj.value = "vm-21"
+        test_vm_mobj_powerState = "poweredOff"
+
+        ops_mock = self._inspector._ops
+        ops_mock.get_vm_mobj.return_value = test_vm_mobj
+        ops_mock.query_vm_property.return_value = test_vm_mobj_powerState
+        self.assertRaises(virt_inspector.InstanceShutOffException,
+                          self._inspector._get_vm_mobj_not_power_off_or_raise,
+                          mock.MagicMock())
+
+    def test_instance_poweredOn(self):
+        test_vm_mobj = mock.MagicMock()
+        test_vm_mobj.value = "vm-21"
+        test_vm_mobj_powerState = "poweredOn"
+
+        ops_mock = self._inspector._ops
+        ops_mock.get_vm_mobj.return_value = test_vm_mobj
+        ops_mock.query_vm_property.return_value = test_vm_mobj_powerState
+        vm_mobj = self._inspector._get_vm_mobj_not_power_off_or_raise(
+            mock.MagicMock())
+        self.assertEqual(test_vm_mobj.value, vm_mobj.value)
 
     def test_inspect_memory_usage(self):
-        fake_instance_moid = 'fake_instance_moid'
-        fake_instance_id = 'fake_instance_id'
+        test_vm_mobj = mock.MagicMock()
+        test_vm_mobj.value = "vm-21"
         fake_perf_counter_id = 'fake_perf_counter_id'
         fake_memory_value = 1024.0
-        fake_stat = virt_inspector.MemoryUsageStats(usage=1.0)
 
-        def construct_mock_instance_object(fake_instance_id):
-            instance_object = mock.MagicMock()
-            instance_object.id = fake_instance_id
-            return instance_object
+        self._inspector._get_vm_mobj_not_power_off_or_raise = mock.MagicMock()
+        self._inspector._get_vm_mobj_not_power_off_or_raise.return_value = (
+            test_vm_mobj)
 
-        fake_instance = construct_mock_instance_object(fake_instance_id)
-        self._inspector._ops.get_vm_moid.return_value = fake_instance_moid
-        (self._inspector._ops.
-         get_perf_counter_id.return_value) = fake_perf_counter_id
-        (self._inspector._ops.query_vm_aggregate_stats.
-         return_value) = fake_memory_value
-        memory_stat = self._inspector.inspect_memory_usage(fake_instance)
-        self.assertEqual(fake_stat, memory_stat)
+        ops_mock = self._inspector._ops
+        ops_mock.get_perf_counter_id.return_value = fake_perf_counter_id
+        ops_mock.query_vm_aggregate_stats.return_value = fake_memory_value
+        stats = self._inspector.inspect_instance(mock.MagicMock(), None)
+        self.assertEqual(1.0, stats.memory_usage)
 
     def test_inspect_cpu_util(self):
-        fake_instance_moid = 'fake_instance_moid'
-        fake_instance_id = 'fake_instance_id'
+        test_vm_mobj = mock.MagicMock()
+        test_vm_mobj.value = "vm-21"
         fake_perf_counter_id = 'fake_perf_counter_id'
         fake_cpu_util_value = 60
-        fake_stat = virt_inspector.CPUUtilStats(util=60)
 
-        def construct_mock_instance_object(fake_instance_id):
-            instance_object = mock.MagicMock()
-            instance_object.id = fake_instance_id
-            return instance_object
+        self._inspector._get_vm_mobj_not_power_off_or_raise = mock.MagicMock()
+        self._inspector._get_vm_mobj_not_power_off_or_raise.return_value = (
+            test_vm_mobj)
 
-        fake_instance = construct_mock_instance_object(fake_instance_id)
-        self._inspector._ops.get_vm_moid.return_value = fake_instance_moid
-        (self._inspector._ops.get_perf_counter_id.
-         return_value) = fake_perf_counter_id
-        (self._inspector._ops.query_vm_aggregate_stats.
+        ops_mock = self._inspector._ops
+        ops_mock.get_perf_counter_id.return_value = fake_perf_counter_id
+        (ops_mock.query_vm_aggregate_stats.
          return_value) = fake_cpu_util_value * 100
-        cpu_util_stat = self._inspector.inspect_cpu_util(fake_instance)
-        self.assertEqual(fake_stat, cpu_util_stat)
+        stats = self._inspector.inspect_instance(mock.MagicMock(), None)
+        self.assertEqual(60, stats.cpu_util)
 
     def test_inspect_vnic_rates(self):
 
         # construct test data
-        test_vm_moid = "vm-21"
+        test_vm_mobj = mock.MagicMock()
+        test_vm_mobj.value = "vm-21"
         vnic1 = "vnic-1"
         vnic2 = "vnic-2"
         counter_name_to_id_map = {
@@ -97,32 +123,32 @@ class TestVsphereInspection(base.BaseTestCase):
         def get_counter_id_side_effect(counter_full_name):
             return counter_name_to_id_map[counter_full_name]
 
-        def query_stat_side_effect(vm_moid, counter_id, duration):
+        def query_stat_side_effect(vm_mobj, counter_id, duration):
             # assert inputs
-            self.assertEqual(test_vm_moid, vm_moid)
+            self.assertEqual(test_vm_mobj.value, vm_mobj.value)
             self.assertIn(counter_id, counter_id_to_stats_map)
             return counter_id_to_stats_map[counter_id]
 
+        self._inspector._get_vm_mobj_not_power_off_or_raise = mock.MagicMock()
+        self._inspector._get_vm_mobj_not_power_off_or_raise.return_value = (
+            test_vm_mobj)
+
         # configure vsphere operations mock with the test data
         ops_mock = self._inspector._ops
-        ops_mock.get_vm_moid.return_value = test_vm_moid
         ops_mock.get_perf_counter_id.side_effect = get_counter_id_side_effect
         ops_mock.query_vm_device_stats.side_effect = query_stat_side_effect
-        result = self._inspector.inspect_vnic_rates(mock.MagicMock())
+        result = list(self._inspector.inspect_vnic_rates(
+            mock.MagicMock(), None))
 
-        # validate result
-        expected_stats = {
-            vnic1: virt_inspector.InterfaceRateStats(1024, 2048),
-            vnic2: virt_inspector.InterfaceRateStats(3072, 4096)
-        }
-
-        for vnic, rates_info in result:
-            self.assertEqual(expected_stats[vnic.name], rates_info)
+        self.assertEqual(1024.0, result[0].rx_bytes_rate)
+        self.assertEqual(2048.0, result[0].tx_bytes_rate)
+        self.assertEqual(3072.0, result[1].rx_bytes_rate)
+        self.assertEqual(4096.0, result[1].tx_bytes_rate)
 
     def test_inspect_disk_rates(self):
-
         # construct test data
-        test_vm_moid = "vm-21"
+        test_vm_mobj = mock.MagicMock()
+        test_vm_mobj.value = "vm-21"
         disk1 = "disk-1"
         disk2 = "disk-2"
         counter_name_to_id_map = {
@@ -141,25 +167,28 @@ class TestVsphereInspection(base.BaseTestCase):
         def get_counter_id_side_effect(counter_full_name):
             return counter_name_to_id_map[counter_full_name]
 
-        def query_stat_side_effect(vm_moid, counter_id, duration):
+        def query_stat_side_effect(vm_mobj, counter_id, duration):
             # assert inputs
-            self.assertEqual(test_vm_moid, vm_moid)
+            self.assertEqual(test_vm_mobj.value, vm_mobj.value)
             self.assertIn(counter_id, counter_id_to_stats_map)
             return counter_id_to_stats_map[counter_id]
 
+        self._inspector._get_vm_mobj_not_power_off_or_raise = mock.MagicMock()
+        self._inspector._get_vm_mobj_not_power_off_or_raise.return_value = (
+            test_vm_mobj)
+
         # configure vsphere operations mock with the test data
         ops_mock = self._inspector._ops
-        ops_mock.get_vm_moid.return_value = test_vm_moid
         ops_mock.get_perf_counter_id.side_effect = get_counter_id_side_effect
         ops_mock.query_vm_device_stats.side_effect = query_stat_side_effect
 
-        result = self._inspector.inspect_disk_rates(mock.MagicMock())
+        result = self._inspector.inspect_disk_rates(mock.MagicMock(), None)
 
         # validate result
         expected_stats = {
-            disk1: virt_inspector.DiskRateStats(1024, 300, 5120, 700),
-            disk2: virt_inspector.DiskRateStats(2048, 400, 6144, 0)
+            disk1: virt_inspector.DiskRateStats(disk1, 1024, 300, 5120, 700),
+            disk2: virt_inspector.DiskRateStats(disk2, 2048, 400, 6144, 0)
         }
 
-        actual_stats = dict((disk.device, rates) for (disk, rates) in result)
+        actual_stats = dict((stats.device, stats) for stats in result)
         self.assertEqual(expected_stats, actual_stats)

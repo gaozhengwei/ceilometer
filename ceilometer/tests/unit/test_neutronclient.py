@@ -17,13 +17,15 @@ import mock
 from oslotest import base
 
 from ceilometer import neutron_client
+from ceilometer import service
 
 
 class TestNeutronClient(base.BaseTestCase):
 
     def setUp(self):
         super(TestNeutronClient, self).setUp()
-        self.nc = neutron_client.Client()
+        self.CONF = service.prepare_service([], [])
+        self.nc = neutron_client.Client(self.CONF)
         self.nc.lb_version = 'v1'
 
     @staticmethod

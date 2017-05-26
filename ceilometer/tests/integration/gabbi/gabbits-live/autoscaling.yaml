@@ -26,18 +26,6 @@ tests:
       data: <@create_stack.json
       status: 201
 
-    - name: waiting for stack creation
-      desc: Wait for the second event on the stack resource, it can be a success or failure
-      url: $ENVIRON['HEAT_SERVICE_URL']/stacks/integration_test/events?resource_name=integration_test
-      redirects: true
-      method: GET
-      status: 200
-      poll:
-          count: 300
-          delay: 1
-      response_json_paths:
-          $.events[1].resource_name: integration_test
-
     - name: control stack status
       desc: Checks the stack have been created successfully
       url: $ENVIRON['HEAT_SERVICE_URL']/stacks/integration_test
@@ -45,12 +33,12 @@ tests:
       method: GET
       status: 200
       poll:
-          count: 5
+          count: 300
           delay: 1
       response_json_paths:
           $.stack.stack_status: "CREATE_COMPLETE"
 
-    - name: list servers
+    - name: list servers grow
       desc: Wait the autoscaling stack grow to two servers
       url: $ENVIRON['NOVA_SERVICE_URL']/servers/detail
       method: GET
@@ -74,6 +62,30 @@ tests:
       response_strings:
           - '"id": "$RESPONSE["$.servers[0].id"]"'
           - '"id": "$RESPONSE["$.servers[1].id"]"'
+
+    - name: check event
+      desc: Check panko for new instance.create.end event
+      url: $ENVIRON['PANKO_SERVICE_URL']/v2/events
+      method: GET
+      request_headers:
+          content-type: application/json
+      data:
+          q:
+            - field: event_type
+              op: eq
+              type: string
+              value: compute.instance.create.end
+            - field: resource_id
+              op: eq
+              type: string
+              value: $HISTORY['list servers grow'].$RESPONSE['$.servers[0].id']
+      poll:
+          count: 30
+          delay: 1
+      response_json_paths:
+          $.`len`: 1
+          $[0].event_type: compute.instance.create.end
+          $[0].traits[?(@.name='resource_id')].value: $HISTORY['list servers grow'].$RESPONSE['$.servers[0].id']
 
     - name: check alarm
       desc: Check the aodh alarm and its state
@@ -102,18 +114,6 @@ tests:
       data: <@update_stack.json
       status: 202
 
-    - name: waiting for stack update
-      desc: Wait for the third event on the stack resource, it can be a success or failure
-      url: $ENVIRON['HEAT_SERVICE_URL']/stacks/integration_test/events?resource_name=integration_test
-      redirects: true
-      method: GET
-      status: 200
-      poll:
-          count: 300
-          delay: 1
-      response_json_paths:
-          $.events[3].resource_name: integration_test
-
     - name: control stack status
       desc: Checks the stack have been created successfully
       url: $ENVIRON['HEAT_SERVICE_URL']/stacks/integration_test
@@ -121,12 +121,12 @@ tests:
       method: GET
       status: 200
       poll:
-          count: 5
+          count: 300
           delay: 1
       response_json_paths:
           $.stack.stack_status: "UPDATE_COMPLETE"
 
-    - name: list servers
+    - name: list servers shrink
       desc: Wait the autoscaling stack shrink to one server
       url: $ENVIRON['NOVA_SERVICE_URL']/servers/detail
       method: GET
@@ -156,7 +156,7 @@ tests:
       redirects: true
       method: GET
       poll:
-          count: 240
+          count: 300
           delay: 1
       status: 404
 

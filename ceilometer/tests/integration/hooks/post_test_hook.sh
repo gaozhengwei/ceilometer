@@ -14,54 +14,37 @@
 
 # This script is executed inside post_test_hook function in devstack gate.
 
-function generate_testr_results {
+function export_subunit_data {
+    target="$1"
     if [ -f .testrepository/0 ]; then
-        sudo .tox/functional/bin/testr last --subunit > $WORKSPACE/testrepository.subunit
-        sudo mv $WORKSPACE/testrepository.subunit $BASE/logs/testrepository.subunit
-        sudo /usr/os-testr-env/bin/subunit2html $BASE/logs/testrepository.subunit $BASE/logs/testr_results.html
-        sudo gzip -9 $BASE/logs/testrepository.subunit
-        sudo gzip -9 $BASE/logs/testr_results.html
-        sudo chown jenkins:jenkins $BASE/logs/testrepository.subunit.gz $BASE/logs/testr_results.html.gz
-        sudo chmod a+r $BASE/logs/testrepository.subunit.gz $BASE/logs/testr_results.html.gz
+        sudo testr last --subunit > $WORKSPACE/testrepository.subunit.$target
     fi
 }
 
-# If we're running in the gate find our keystone endpoint to give to
-# gabbi tests and do a chown. Otherwise the existing environment
-# should provide URL and TOKEN.
-if [ -d $BASE/new/devstack ]; then
-    export CEILOMETER_DIR="$BASE/new/ceilometer"
-    STACK_USER=stack
-    sudo chown -R $STACK_USER:stack $CEILOMETER_DIR
-    source $BASE/new/devstack/openrc admin admin
-    # Go to the ceilometer dir
-    cd $CEILOMETER_DIR
-fi
+function generate_testr_results {
+    cat $WORKSPACE/testrepository.subunit.* | sudo tee $BASE/logs/testrepository.subunit
+    sudo /usr/os-testr-env/bin/subunit2html $BASE/logs/testrepository.subunit $BASE/logs/testr_results.html
+    sudo gzip -9 $BASE/logs/testrepository.subunit
+    sudo gzip -9 $BASE/logs/testr_results.html
+    sudo chown jenkins:jenkins $BASE/logs/testrepository.subunit.gz $BASE/logs/testr_results.html.gz
+    sudo chmod a+r $BASE/logs/testrepository.subunit.gz $BASE/logs/testr_results.html.gz
+}
 
-openstack catalog list
-export AODH_SERVICE_URL=$(openstack catalog show alarming -c endpoints -f value | awk '/public/{print $2}')
-export GNOCCHI_SERVICE_URL=$(openstack catalog show metric -c endpoints -f value | awk '/public/{print $2}')
-export HEAT_SERVICE_URL=$(openstack catalog show orchestration -c endpoints -f value | awk '/public/{print $2}')
-export NOVA_SERVICE_URL=$(openstack catalog show compute -c endpoints -f value | awk '/public/{print $2}')
-export GLANCE_IMAGE_NAME=$(openstack image list | awk '/ cirros.*uec /{print $4}')
-export ADMIN_TOKEN=$(openstack token issue -c id -f value)
-
-# Run tests
-echo "Running telemetry integration test suite"
-set +e
-
-sudo -E -H -u ${STACK_USER:-${USER}} tox -eintegration
-EXIT_CODE=$?
-
-echo "* Message queue status:"
-sudo rabbitmqctl list_queues | grep -e \\.sample -e \\.info
-
-if [ $EXIT_CODE -ne 0 ] ; then
+function generate_telemetry_report(){
     set +x
+    set +e
+
+    echo "* Message queue status:"
+    sudo rabbitmqctl list_queues | grep -e \\.sample -e \\.info
+
+    source $BASE/new/devstack/openrc admin admin
+
     echo "* Heat stack:"
     openstack stack show integration_test
     echo "* Alarm list:"
-    ceilometer alarm-list
+    aodh alarm list
+    echo "* Event list:"
+    ceilometer event-list -q 'event_type=string::compute.instance.create.end'
     echo "* Nova instance list:"
     openstack server list
 
@@ -81,15 +64,32 @@ if [ $EXIT_CODE -ne 0 ] ; then
     # Be sure to source Gnocchi settings before
     source $BASE/new/gnocchi/devstack/settings
     echo "* Unprocessed measures:"
-    sudo find $GNOCCHI_DATA_DIR/measure
+    for key in $(redis-cli --scan --pattern 'incoming*'); do echo -n $key && redis-cli llen $key; done
 
+    set -e
     set -x
-fi
+}
 
+function generate_reports_and_maybe_exit() {
+    local ret="$1"
+    if [[ $ret != 0 ]]; then
+        # Collect and parse result
+        generate_telemetry_report
+        generate_testr_results
+        exit $ret
+    fi
+}
+
+
+# Run tests with tempest
+sudo chown -R tempest:stack $BASE/new/tempest
+sudo chown -R tempest:stack $BASE/data/tempest
+cd $BASE/new/tempest
+set +e
+sudo -H -u tempest OS_TEST_TIMEOUT=$TEMPEST_OS_TEST_TIMEOUT tox -eall-plugin -- ceilometer.tests.tempest.scenario.test_telemetry_integration --concurrency=$TEMPEST_CONCURRENCY
+EXIT_CODE=$?
 set -e
+export_subunit_data "all-plugin"
+generate_reports_and_maybe_exit $EXIT_CODE
 
-# Collect and parse result
-if [ -n "$CEILOMETER_DIR" ]; then
-    generate_testr_results
-fi
 exit $EXIT_CODE

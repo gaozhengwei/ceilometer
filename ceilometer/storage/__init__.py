@@ -16,11 +16,10 @@
 """
 
 from oslo_config import cfg
-from oslo_db import options as db_options
 from oslo_log import log
-import retrying
 import six.moves.urllib.parse as urlparse
 from stevedore import driver
+import tenacity
 
 from ceilometer import utils
 
@@ -35,34 +34,16 @@ OPTS = [
                "in the database for (<= 0 means forever).",
                deprecated_opts=[cfg.DeprecatedOpt('time_to_live',
                                                   'database')]),
-    cfg.IntOpt('event_time_to_live',
-               default=-1,
-               help=("Number of seconds that events are kept "
-                     "in the database for (<= 0 means forever).")),
     cfg.StrOpt('metering_connection',
                secret=True,
                help='The connection string used to connect to the metering '
                'database. (if unset, connection is used)'),
-    cfg.StrOpt('event_connection',
-               secret=True,
-               help='The connection string used to connect to the event '
-               'database. (if unset, connection is used)'),
-]
-
-cfg.CONF.register_opts(OPTS, group='database')
-
-CLI_OPTS = [
-    cfg.BoolOpt('sql-expire-samples-only',
+    cfg.BoolOpt('sql_expire_samples_only',
                 default=False,
                 help="Indicates if expirer expires only samples. If set true,"
-                     " expired samples will be deleted, but residual"
-                     " resource and meter definition data will remain.",
-                ),
+                " expired samples will be deleted, but residual"
+                " resource and meter definition data will remain."),
 ]
-
-cfg.CONF.register_cli_opts(CLI_OPTS)
-
-db_options.set_defaults(cfg.CONF)
 
 
 class StorageUnknownWriteError(Exception):
@@ -78,32 +59,34 @@ class StorageBadAggregate(Exception):
     code = 400
 
 
-def get_connection_from_config(conf, purpose='metering'):
+def get_connection_from_config(conf):
     retries = conf.database.max_retries
 
-    # Convert retry_interval secs to msecs for retry decorator
-    @retrying.retry(wait_fixed=conf.database.retry_interval * 1000,
-                    stop_max_attempt_number=retries if retries >= 0 else None)
+    @tenacity.retry(
+        wait=tenacity.wait_fixed(conf.database.retry_interval),
+        stop=(tenacity.stop_after_attempt(retries) if retries >= 0
+              else tenacity.stop_never),
+        reraise=True)
     def _inner():
-        namespace = 'ceilometer.%s.storage' % purpose
-        url = (getattr(conf.database, '%s_connection' % purpose) or
+        url = (getattr(conf.database, 'metering_connection') or
                conf.database.connection)
-        return get_connection(url, namespace)
+        return get_connection(conf, url)
 
     return _inner()
 
 
-def get_connection(url, namespace):
+def get_connection(conf, url):
     """Return an open connection to the database."""
     connection_scheme = urlparse.urlparse(url).scheme
     # SqlAlchemy connections specify may specify a 'dialect' or
     # 'dialect+driver'. Handle the case where driver is specified.
     engine_name = connection_scheme.split('+')[0]
+    namespace = 'ceilometer.metering.storage'
     # NOTE: translation not applied bug #1446983
     LOG.debug('looking for %(name)r driver in %(namespace)r',
               {'name': engine_name, 'namespace': namespace})
     mgr = driver.DriverManager(namespace, engine_name)
-    return mgr.driver(url)
+    return mgr.driver(conf, url)
 
 
 class SampleFilter(object):

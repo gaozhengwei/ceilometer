@@ -12,16 +12,12 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-from oslo_config import cfg
 from oslo_log import log
 
 from ceilometer.agent import plugin_base as plugin
-from ceilometer.i18n import _LW
 from ceilometer import keystone_client
 
 LOG = log.getLogger(__name__)
-
-cfg.CONF.import_group('service_credentials', 'ceilometer.keystone_client')
 
 
 class EndpointDiscovery(plugin.DiscoveryBase):
@@ -32,15 +28,14 @@ class EndpointDiscovery(plugin.DiscoveryBase):
     at once.
     """
 
-    @staticmethod
-    def discover(manager, param=None):
+    def discover(self, manager, param=None):
         endpoints = keystone_client.get_service_catalog(
             manager.keystone).get_urls(
                 service_type=param,
-                interface=cfg.CONF.service_credentials.interface,
-                region_name=cfg.CONF.service_credentials.region_name)
+                interface=self.conf.service_credentials.interface,
+                region_name=self.conf.service_credentials.region_name)
         if not endpoints:
-            LOG.warning(_LW('No endpoints found for service %s'),
+            LOG.warning('No endpoints found for service %s',
                         "<all services>" if param is None else param)
             return []
         return endpoints

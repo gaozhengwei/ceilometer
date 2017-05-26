@@ -16,13 +16,15 @@ from neutronclient.v2_0 import client
 from oslotest import base
 
 from ceilometer import neutron_client
+from ceilometer import service
 
 
 class TestNeutronClientLBaaSV2(base.BaseTestCase):
 
     def setUp(self):
         super(TestNeutronClientLBaaSV2, self).setUp()
-        self.nc = neutron_client.Client()
+        conf = service.prepare_service([], [])
+        self.nc = neutron_client.Client(conf)
 
     @staticmethod
     def fake_list_lbaas_pools():

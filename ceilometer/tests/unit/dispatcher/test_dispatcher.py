@@ -12,41 +12,34 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import fixtures
 from oslo_config import fixture
-from oslotest import mockpatch
 
 from ceilometer import dispatcher
+from ceilometer import service
 from ceilometer.tests import base
 
 
-class FakeDispatcherSample(dispatcher.MeterDispatcherBase):
+class FakeMeterDispatcher(dispatcher.MeterDispatcherBase):
     def record_metering_data(self, data):
-        pass
-
-
-class FakeDispatcher(dispatcher.MeterDispatcherBase,
-                     dispatcher.EventDispatcherBase):
-    def record_metering_data(self, data):
-        pass
-
-    def record_events(self, events):
         pass
 
 
 class TestDispatchManager(base.BaseTestCase):
     def setUp(self):
         super(TestDispatchManager, self).setUp()
-        self.conf = self.useFixture(fixture.Config())
+        conf = service.prepare_service([], [])
+        self.conf = self.useFixture(fixture.Config(conf))
         self.conf.config(meter_dispatchers=['database', 'gnocchi'],
                          event_dispatchers=['database'])
-        self.useFixture(mockpatch.Patch(
+        self.CONF = self.conf.conf
+        self.useFixture(fixtures.MockPatch(
             'ceilometer.dispatcher.gnocchi.GnocchiDispatcher',
-            new=FakeDispatcherSample))
-        self.useFixture(mockpatch.Patch(
-            'ceilometer.dispatcher.database.DatabaseDispatcher',
-            new=FakeDispatcher))
+            new=FakeMeterDispatcher))
+        self.useFixture(fixtures.MockPatch(
+            'ceilometer.dispatcher.database.MeterDatabaseDispatcher',
+            new=FakeMeterDispatcher))
 
     def test_load(self):
-        sample_mg, event_mg = dispatcher.load_dispatcher_manager()
+        sample_mg, event_mg = dispatcher.load_dispatcher_manager(self.CONF)
         self.assertEqual(2, len(list(sample_mg)))
-        self.assertEqual(1, len(list(event_mg)))

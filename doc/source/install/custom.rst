@@ -64,75 +64,54 @@ For polling agent using ceilometer-polling.conf, settings like::
 
 Doing this, it's easy to listen/receive data from multiple internal and external services.
 
+..  _publisher-configuration:
 
-Using multiple dispatchers
-==========================
+Using multiple publishers
+=========================
 
 .. index::
-   double: customizing deployment; multiple dispatchers
+   double: customizing deployment; multiple publishers
 
-The Ceilometer collector allows multiple dispatchers to be configured so that
-data can be easily sent to multiple internal and external systems. Dispatchers
-are divided between ``event_dispatchers`` and ``meter_dispatchers`` which can
-each be provided with their own set of receiving systems.
+Ceilometer allows multiple publishers to be configured in pipeline so that
+data can be easily sent to multiple internal and external systems. Ceilometer
+allows to set two types of pipelines. One is ``pipeline.yaml`` which is for
+meters, another is ``event_pipeline.yaml`` which is for events.
 
-.. note::
-
-  In Liberty and prior, the configuration option for all data was
-  ``dispatcher`` but this was changed for the Mitaka release to break out
-  separate destination systems by type of data.
-
-By default, Ceilometer only saves event and meter data in a database. If you
+By default, Ceilometer only saves event and meter data into Gnocchi_. If you
 want Ceilometer to send data to other systems, instead of or in addition to
-the Ceilometer database, multiple dispatchers can be enabled by modifying the
-Ceilometer configuration file.
+the default storage services, multiple publishers can be enabled by modifying
+the Ceilometer pipeline.
 
-Ceilometer ships multiple dispatchers currently. They are ``database``,
-``file``, ``http`` and ``gnocchi`` dispatcher. As the names imply, database
-dispatcher sends metering data to a database, file dispatcher logs meters into
-a file, http dispatcher posts the meters onto a http target, gnocchi
-dispatcher posts the meters onto Gnocchi_ backend. Each dispatcher can have
-its own configuration parameters. Please see available configuration
-parameters at the beginning of each dispatcher file.
+Ceilometer ships multiple publishers currently. They are ``database``,
+``notifier``, ``file``, ``http`` and ``gnocchi`` publishers.
 
-.. _Gnocchi: http://gnocchi.readthedocs.org/en/latest/basic.html
+.. _Gnocchi: http://gnocchi.xyz
 
-To check if any of the dispatchers is available in your system, you can
-inspect the Ceilometer egg entry_points.txt file, you should normally see text
-like the following::
+To configure one or multiple publishers for Ceilometer, find the Ceilometer
+configuration file ``pipeline.yaml`` and/or ``event_pipeline.yaml`` which is
+normally located at /etc/ceilometer directory and make changes accordingly.
+Your configuration file can be in a different directory.
 
-   [ceilometer.dispatcher]
-   database = ceilometer.dispatcher.database:DatabaseDispatcher
-   file = ceilometer.dispatcher.file:FileDispatcher
-   http = ceilometer.dispatcher.http:HttpDispatcher
-   gnocchi = ceilometer.dispatcher.gnocchi:GnocchiDispatcher
+To use multiple publishers, add multiple publisher lines in ``pipeline.yaml`` and/or
+``event_pipeline.yaml`` file like the following::
 
-To configure one or multiple dispatchers for Ceilometer, find the Ceilometer
-configuration file ceilometer.conf which is normally located at /etc/ceilometer
-directory and make changes accordingly. Your configuration file can be in a
-different directory.
+   ---
+   sources:
+      - name: source_name
+         events:
+            - "*"
+         sinks:
+            - sink_name
+   sinks:
+      - name: sink_name
+         transformers:
+         publishers:
+            - database://
+            - gnocchi://
+            - file://
 
-To use multiple dispatchers on a Ceilometer collector service, add multiple
-dispatcher lines in ceilometer.conf file like the following::
-
-   [DEFAULT]
-   meter_dispatchers=database
-   meter_dispatchers=file
-
-If there is no dispatcher present, database dispatcher is used as the
-default. If in some cases such as traffic tests, no dispatcher is needed,
-one can configure the line without a dispatcher, like the following::
-
-   event_dispatchers=
-
-With the above configuration, no event dispatcher is used by the Ceilometer
-collector service, all event data received by Ceilometer collector will be
-dropped.
-
-For Gnocchi dispatcher, the following configuration settings should be added::
-
-    [DEFAULT]
-    meter_dispatchers = gnocchi
+For the Gnocchi publisher, the following configuration settings should be added
+into /etc/ceilometer/ceilometer.conf::
 
     [dispatcher_gnocchi]
     archive_policy = low
@@ -140,16 +119,26 @@ For Gnocchi dispatcher, the following configuration settings should be added::
 The value specified for ``archive_policy`` should correspond to the name of an
 ``archive_policy`` configured within Gnocchi.
 
-For Gnocchi dispatcher backed by Swift storage, the following additional
+For the Gnocchi publisher backed by Swift storage, the following additional
 configuration settings should be added::
 
     [dispatcher_gnocchi]
     filter_project = gnocchi_swift
     filter_service_activity = True
 
-.. note::
-   If gnocchi dispatcher is enabled, Ceilometer api calls will return a 410 with
-   an empty result. The Gnocchi Api should be used instead to access the data.
+Custom pipeline
+===============
+
+The paths of all pipeline files including ``pipeline.yaml`` and ``event_pipeline.yaml``
+are located to ceilometer/pipeline/data by default. And it's possible to set the
+path through ``pipeline_cfg_file`` being assigned to another one in ``ceilometer.conf``.
+
+Ceilometer allow users to customize pipeline files. Before that, copy the following
+yaml files::
+
+    $ cp ceilometer/pipeline/data/*.yaml /etc/ceilometer
+
+Then you can add configurations according to the former section.
 
 Efficient polling
 =================
@@ -161,5 +150,4 @@ Efficient polling
   requests in a short time period.
 - There is an option to stream samples to minimise latency (at the
   expense of load) by setting ``batch_polled_samples`` to ``False`` in
-  ceilometer.conf.
-
+  ``ceilometer.conf``.

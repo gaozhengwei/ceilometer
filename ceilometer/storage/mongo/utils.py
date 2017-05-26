@@ -19,7 +19,6 @@ import datetime
 import time
 import weakref
 
-from oslo_config import cfg
 from oslo_log import log
 from oslo_utils import netutils
 import pymongo
@@ -27,15 +26,11 @@ import pymongo.errors
 import six
 from six.moves.urllib import parse
 
-from ceilometer.i18n import _, _LI
+from ceilometer.i18n import _
 
 ERROR_INDEX_WITH_DIFFERENT_SPEC_ALREADY_EXISTS = 86
 
 LOG = log.getLogger(__name__)
-
-EVENT_TRAIT_TYPES = {'none': 0, 'string': 1, 'integer': 2, 'float': 3,
-                     'datetime': 4}
-OP_SIGN = {'lt': '$lt', 'le': '$lte', 'ne': '$ne', 'gt': '$gt', 'ge': '$gte'}
 
 MINIMUM_COMPATIBLE_MONGODB_VERSION = [2, 4]
 COMPLETE_AGGREGATE_COMPATIBLE_VERSION = [2, 6]
@@ -72,54 +67,6 @@ def make_timestamp_range(start, end,
             end_timestamp_op = '$lt'
         ts_range[end_timestamp_op] = end
     return ts_range
-
-
-def make_events_query_from_filter(event_filter):
-    """Return start and stop row for filtering and a query.
-
-    Query is based on the selected parameter.
-
-    :param event_filter: storage.EventFilter object.
-    """
-    query = {}
-    q_list = []
-    ts_range = make_timestamp_range(event_filter.start_timestamp,
-                                    event_filter.end_timestamp)
-    if ts_range:
-        q_list.append({'timestamp': ts_range})
-    if event_filter.event_type:
-        q_list.append({'event_type': event_filter.event_type})
-    if event_filter.message_id:
-        q_list.append({'_id': event_filter.message_id})
-
-    if event_filter.traits_filter:
-        for trait_filter in event_filter.traits_filter:
-            op = trait_filter.pop('op', 'eq')
-            dict_query = {}
-            for k, v in six.iteritems(trait_filter):
-                if v is not None:
-                    # All parameters in EventFilter['traits'] are optional, so
-                    # we need to check if they are in the query or no.
-                    if k == 'key':
-                        dict_query.setdefault('trait_name', v)
-                    elif k in ['string', 'integer', 'datetime', 'float']:
-                        dict_query.setdefault('trait_type',
-                                              EVENT_TRAIT_TYPES[k])
-                        dict_query.setdefault('trait_value',
-                                              v if op == 'eq'
-                                              else {OP_SIGN[op]: v})
-            dict_query = {'$elemMatch': dict_query}
-            q_list.append({'traits': dict_query})
-    if event_filter.admin_proj:
-        q_list.append({'$or': [
-            {'traits': {'$not': {'$elemMatch': {'trait_name': 'project_id'}}}},
-            {'traits': {
-                '$elemMatch': {'trait_name': 'project_id',
-                               'trait_value': event_filter.admin_proj}}}]})
-    if q_list:
-        query = {'$and': q_list}
-
-    return query
 
 
 def make_query_from_filter(sample_filter, require_meter=True):
@@ -239,7 +186,7 @@ class ConnectionPool(object):
     def __init__(self):
         self._pool = {}
 
-    def connect(self, url):
+    def connect(self, conf, url):
         connection_options = pymongo.uri_parser.parse_uri(url)
         del connection_options['database']
         del connection_options['username']
@@ -254,15 +201,15 @@ class ConnectionPool(object):
         splitted_url = netutils.urlsplit(url)
         log_data = {'db': splitted_url.scheme,
                     'nodelist': connection_options['nodelist']}
-        LOG.info(_LI('Connecting to %(db)s on %(nodelist)s') % log_data)
-        client = self._mongo_connect(url)
+        LOG.info('Connecting to %(db)s on %(nodelist)s' % log_data)
+        client = self._mongo_connect(conf, url)
         self._pool[pool_key] = weakref.ref(client)
         return client
 
     @staticmethod
-    def _mongo_connect(url):
+    def _mongo_connect(conf, url):
         try:
-            return MongoProxy(pymongo.MongoClient(url))
+            return MongoProxy(conf, pymongo.MongoClient(url))
         except pymongo.errors.ConnectionFailure as e:
             LOG.warning(_('Unable to connect to the database server: '
                         '%(errmsg)s.') % {'errmsg': e})
@@ -394,20 +341,20 @@ class QueryTransformer(object):
 
 
 def safe_mongo_call(call):
-    def closure(*args, **kwargs):
+    def closure(self, *args, **kwargs):
         # NOTE(idegtiarov) options max_retries and retry_interval have been
         # registered in storage.__init__ in oslo_db.options.set_defaults
         # default values for both options are 10.
-        max_retries = cfg.CONF.database.max_retries
-        retry_interval = cfg.CONF.database.retry_interval
+        max_retries = self.conf.database.max_retries
+        retry_interval = self.conf.database.retry_interval
         attempts = 0
         while True:
             try:
-                return call(*args, **kwargs)
+                return call(self, *args, **kwargs)
             except pymongo.errors.AutoReconnect as err:
                 if 0 <= max_retries <= attempts:
-                    LOG.error(_('Unable to reconnect to the primary mongodb '
-                                'after %(retries)d retries. Giving up.') %
+                    LOG.error('Unable to reconnect to the primary mongodb '
+                              'after %(retries)d retries. Giving up.' %
                               {'retries': max_retries})
                     raise
                 LOG.warning(_('Unable to reconnect to the primary '
@@ -420,7 +367,8 @@ def safe_mongo_call(call):
 
 
 class MongoConn(object):
-    def __init__(self, method):
+    def __init__(self, conf, method):
+        self.conf = conf
         self.method = method
 
     @safe_mongo_call
@@ -436,28 +384,29 @@ MONGO_METHODS.update(set([typ for typ in dir(pymongo)
 
 
 class MongoProxy(object):
-    def __init__(self, conn):
+    def __init__(self, conf, conn):
         self.conn = conn
+        self.conf = conf
 
     def __getitem__(self, item):
         """Create and return proxy around the method in the connection.
 
         :param item: name of the connection
         """
-        return MongoProxy(self.conn[item])
+        return MongoProxy(self.conf, self.conn[item])
 
     def find(self, *args, **kwargs):
         # We need this modifying method to return a CursorProxy object so that
         # we can handle the Cursor next function to catch the AutoReconnect
         # exception.
-        return CursorProxy(self.conn.find(*args, **kwargs))
+        return CursorProxy(self.conf, self.conn.find(*args, **kwargs))
 
     def create_index(self, keys, name=None, *args, **kwargs):
         try:
             self.conn.create_index(keys, name=name, *args, **kwargs)
         except pymongo.errors.OperationFailure as e:
             if e.code is ERROR_INDEX_WITH_DIFFERENT_SPEC_ALREADY_EXISTS:
-                LOG.info(_LI("Index %s will be recreate.") % name)
+                LOG.info("Index %s will be recreate.", name)
                 self._recreate_index(keys, name, *args, **kwargs)
 
     @safe_mongo_call
@@ -472,19 +421,22 @@ class MongoProxy(object):
         insert, wrap this method in the MongoConn.
         Else wrap getting attribute with MongoProxy.
         """
-        if item in ('name', 'database'):
+        if item in ("conf",):
+            return super(MongoProxy, self).__getattr__(item)
+        elif item in ('name', 'database'):
             return getattr(self.conn, item)
-        if item in MONGO_METHODS:
-            return MongoConn(getattr(self.conn, item))
-        return MongoProxy(getattr(self.conn, item))
+        elif item in MONGO_METHODS:
+            return MongoConn(self.conf, getattr(self.conn, item))
+        return MongoProxy(self.conf, getattr(self.conn, item))
 
     def __call__(self, *args, **kwargs):
         return self.conn(*args, **kwargs)
 
 
 class CursorProxy(pymongo.cursor.Cursor):
-    def __init__(self, cursor):
+    def __init__(self, conf, cursor):
         self.cursor = cursor
+        self.conf = conf
 
     def __getitem__(self, item):
         return self.cursor[item]

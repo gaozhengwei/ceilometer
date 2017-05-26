@@ -14,17 +14,12 @@
 
 import copy
 
-from oslo_config import cfg
 from oslo_log import log
 import requests
 import six
 from six.moves.urllib import parse as urlparse
 
 from ceilometer.i18n import _
-
-
-CONF = cfg.CONF
-CONF.import_opt('http_timeout', 'ceilometer.service')
 
 
 LOG = log.getLogger(__name__)
@@ -37,7 +32,8 @@ class OpencontrailAPIFailed(Exception):
 class AnalyticsAPIBaseClient(object):
     """Opencontrail Base Statistics REST API Client."""
 
-    def __init__(self, endpoint, data):
+    def __init__(self, conf, endpoint, data):
+        self.conf = conf
         self.endpoint = endpoint
         self.data = data or {}
 
@@ -67,14 +63,13 @@ class AnalyticsAPIBaseClient(object):
             },
             'data': data,
             'allow_redirects': False,
-            'timeout': CONF.http_timeout,
+            'timeout': self.conf.http_timeout,
         }
 
         return req_params
 
-    @staticmethod
-    def _log_req(url, req_params):
-        if not CONF.debug:
+    def _log_req(self, url, req_params):
+        if not self.conf.debug:
             return
 
         curl_command = ['REQ: curl -i -X GET ']
@@ -90,9 +85,8 @@ class AnalyticsAPIBaseClient(object):
 
         LOG.debug(''.join(curl_command))
 
-    @staticmethod
-    def _log_res(resp):
-        if not CONF.debug:
+    def _log_res(self, resp):
+        if not self.conf.debug:
             return
 
         dump = ['RES: \n', 'HTTP %.1f %s %s\n' % (resp.raw.version,
@@ -124,6 +118,5 @@ class NetworksAPIClient(AnalyticsAPIBaseClient):
 
 
 class Client(object):
-
-    def __init__(self, endpoint, data=None):
-        self.networks = NetworksAPIClient(endpoint, data)
+    def __init__(self, conf, endpoint, data=None):
+        self.networks = NetworksAPIClient(conf, endpoint, data)

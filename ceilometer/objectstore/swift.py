@@ -22,9 +22,9 @@ from oslo_config import cfg
 from oslo_log import log
 import six.moves.urllib.parse as urlparse
 from swiftclient import client as swift
+from swiftclient.exceptions import ClientException
 
 from ceilometer.agent import plugin_base
-from ceilometer.i18n import _LI
 from ceilometer import keystone_client
 from ceilometer import sample
 
@@ -44,10 +44,6 @@ SERVICE_OPTS = [
                help='Swift service type.'),
 ]
 
-cfg.CONF.register_opts(OPTS)
-cfg.CONF.register_opts(SERVICE_OPTS, group='service_types')
-cfg.CONF.import_group('service_credentials', 'ceilometer.keystone_client')
-
 
 class _Base(plugin_base.PollsterBase):
 
@@ -63,19 +59,19 @@ class _Base(plugin_base.PollsterBase):
         return 'swift.%s_account' % self.METHOD
 
     @staticmethod
-    def _get_endpoint(ksclient):
+    def _get_endpoint(conf, ksclient):
         # we store the endpoint as a base class attribute, so keystone is
         # only ever called once
         if _Base._ENDPOINT is None:
             try:
-                conf = cfg.CONF.service_credentials
+                creds = conf.service_credentials
                 _Base._ENDPOINT = keystone_client.get_service_catalog(
                     ksclient).url_for(
-                        service_type=cfg.CONF.service_types.swift,
-                        interface=conf.interface,
-                        region_name=conf.region_name)
+                        service_type=conf.service_types.swift,
+                        interface=creds.interface,
+                        region_name=creds.region_name)
             except exceptions.EndpointNotFound as e:
-                LOG.info(_LI("Swift endpoint not found: %s"), e)
+                LOG.info("Swift endpoint not found: %s", e)
         return _Base._ENDPOINT
 
     def _iter_accounts(self, ksclient, cache, tenants):
@@ -85,25 +81,32 @@ class _Base(plugin_base.PollsterBase):
         return iter(cache[self.CACHE_KEY_METHOD])
 
     def _get_account_info(self, ksclient, tenants):
-        endpoint = self._get_endpoint(ksclient)
+        endpoint = self._get_endpoint(self.conf, ksclient)
         if not endpoint:
             raise StopIteration()
 
+        swift_api_method = getattr(swift, '%s_account' % self.METHOD)
         for t in tenants:
-            api_method = '%s_account' % self.METHOD
-            yield (t.id, getattr(swift, api_method)
-                                (self._neaten_url(endpoint, t.id),
-                                 keystone_client.get_auth_token(ksclient)))
+            try:
+                yield (t.id, swift_api_method(
+                    self._neaten_url(endpoint, t.id,
+                                     self.conf.reseller_prefix),
+                    keystone_client.get_auth_token(ksclient)))
+            except ClientException as e:
+                if e.http_status == 404:
+                    LOG.warning("Swift tenant id %s not found.", t.id)
+                else:
+                    raise e
 
     @staticmethod
-    def _neaten_url(endpoint, tenant_id):
+    def _neaten_url(endpoint, tenant_id, reseller_prefix):
         """Transform the registered url to standard and valid format."""
         return urlparse.urljoin(endpoint.split('/v1')[0].rstrip('/') + '/',
-                                'v1/' + cfg.CONF.reseller_prefix + tenant_id)
+                                'v1/' + reseller_prefix + tenant_id)
 
 
 class ObjectsPollster(_Base):
-    """Collect the total objects count for each project."""
+    """Collect the total objects count for each project"""
     def get_samples(self, manager, cache, resources):
         tenants = resources
         for tenant, account in self._iter_accounts(manager.keystone,
@@ -121,7 +124,7 @@ class ObjectsPollster(_Base):
 
 
 class ObjectsSizePollster(_Base):
-    """Collect the total objects size of each project."""
+    """Collect the total objects size of each project"""
     def get_samples(self, manager, cache, resources):
         tenants = resources
         for tenant, account in self._iter_accounts(manager.keystone,
@@ -139,7 +142,7 @@ class ObjectsSizePollster(_Base):
 
 
 class ObjectsContainersPollster(_Base):
-    """Collect the container count for each project."""
+    """Collect the container count for each project"""
     def get_samples(self, manager, cache, resources):
         tenants = resources
         for tenant, account in self._iter_accounts(manager.keystone,
@@ -157,7 +160,7 @@ class ObjectsContainersPollster(_Base):
 
 
 class ContainersObjectsPollster(_Base):
-    """Collect the objects count per container for each project."""
+    """Collect the objects count per container for each project"""
 
     METHOD = 'get'
 
@@ -180,7 +183,7 @@ class ContainersObjectsPollster(_Base):
 
 
 class ContainersSizePollster(_Base):
-    """Collect the total objects size per container for each project."""
+    """Collect the total objects size per container for each project"""
 
     METHOD = 'get'
 

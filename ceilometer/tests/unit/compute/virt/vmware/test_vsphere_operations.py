@@ -31,7 +31,7 @@ class VsphereOperationsTest(base.BaseTestCase):
                                                                  1000)
         super(VsphereOperationsTest, self).setUp()
 
-    def test_get_vm_moid(self):
+    def test_get_vm_object(self):
 
         vm1_moid = "vm-1"
         vm2_moid = "vm-2"
@@ -41,10 +41,12 @@ class VsphereOperationsTest(base.BaseTestCase):
         def construct_mock_vm_object(vm_moid, vm_instance):
             vm_object = mock.MagicMock()
             vm_object.obj.value = vm_moid
+            vm_object.obj._type = "VirtualMachine"
             vm_object.propSet[0].val = vm_instance
             return vm_object
 
-        def retrieve_props_side_effect(pc, specSet, options):
+        def retrieve_props_side_effect(pc, specSet,
+                                       options, skip_op_id=False):
             # assert inputs
             self.assertEqual(self._vsphere_ops._max_objects,
                              options.maxObjects)
@@ -62,21 +64,24 @@ class VsphereOperationsTest(base.BaseTestCase):
         vim_mock.RetrievePropertiesEx.side_effect = retrieve_props_side_effect
         vim_mock.ContinueRetrievePropertiesEx.return_value = None
 
-        vm_moid = self._vsphere_ops.get_vm_moid(vm1_instance)
-        self.assertEqual(vm1_moid, vm_moid)
+        vm_object = self._vsphere_ops.get_vm_mobj(vm1_instance)
+        self.assertEqual(vm1_moid, vm_object.value)
+        self.assertEqual("VirtualMachine", vm_object._type)
 
-        vm_moid = self._vsphere_ops.get_vm_moid(vm2_instance)
-        self.assertEqual(vm2_moid, vm_moid)
+        vm_object = self._vsphere_ops.get_vm_mobj(vm2_instance)
+        self.assertEqual(vm2_moid, vm_object.value)
+        self.assertEqual("VirtualMachine", vm_object._type)
 
     def test_query_vm_property(self):
-
-        vm_moid = "vm-21"
+        vm_object = mock.MagicMock()
+        vm_object.value = "vm-21"
         vm_property_name = "runtime.powerState"
         vm_property_val = "poweredON"
 
-        def retrieve_props_side_effect(pc, specSet, options):
+        def retrieve_props_side_effect(pc, specSet, options,
+                                       skip_op_id=False):
             # assert inputs
-            self.assertEqual(vm_moid, specSet[0].obj.value)
+            self.assertEqual(vm_object.value, specSet[0].obj.value)
             self.assertEqual(vm_property_name, specSet[0].pathSet[0])
 
             # mock return result
@@ -86,8 +91,7 @@ class VsphereOperationsTest(base.BaseTestCase):
 
         vim_mock = self._vsphere_ops._api_session._vim
         vim_mock.RetrievePropertiesEx.side_effect = retrieve_props_side_effect
-
-        actual_val = self._vsphere_ops.query_vm_property(vm_moid,
+        actual_val = self._vsphere_ops.query_vm_property(vm_object,
                                                          vm_property_name)
         self.assertEqual(vm_property_val, actual_val)
 
@@ -102,7 +106,8 @@ class VsphereOperationsTest(base.BaseTestCase):
             counter_info.key = counter_id
             return counter_info
 
-        def retrieve_props_side_effect(pc, specSet, options):
+        def retrieve_props_side_effect(pc, specSet, options,
+                                       skip_op_id=False):
             # assert inputs
             self.assertEqual(vsphere_operations.PERF_COUNTER_PROPERTY,
                              specSet[0].pathSet[0])
@@ -126,7 +131,8 @@ class VsphereOperationsTest(base.BaseTestCase):
 
     def test_query_vm_stats(self):
 
-        vm_moid = "vm-21"
+        vm_object = mock.MagicMock()
+        vm_object.value = "vm-21"
         device1 = "device-1"
         device2 = "device-2"
         device3 = "device-3"
@@ -140,7 +146,7 @@ class VsphereOperationsTest(base.BaseTestCase):
 
         def vim_query_perf_side_effect(perf_manager, querySpec):
             # assert inputs
-            self.assertEqual(vm_moid, querySpec[0].entity.value)
+            self.assertEqual(vm_object.value, querySpec[0].entity.value)
             self.assertEqual(counter_id, querySpec[0].metricId[0].counterId)
             self.assertEqual(vsphere_operations.VC_REAL_TIME_SAMPLING_INTERVAL,
                              querySpec[0].intervalId)
@@ -161,7 +167,7 @@ class VsphereOperationsTest(base.BaseTestCase):
         ops = self._vsphere_ops
 
         # test aggregate stat
-        stat_val = ops.query_vm_aggregate_stats(vm_moid, counter_id, 60)
+        stat_val = ops.query_vm_aggregate_stats(vm_object, counter_id, 60)
         self.assertEqual(222, stat_val)
 
         # test per-device(non-aggregate) stats
@@ -170,5 +176,5 @@ class VsphereOperationsTest(base.BaseTestCase):
             device2: 20,
             device3: 2
         }
-        stats = ops.query_vm_device_stats(vm_moid, counter_id, 60)
+        stats = ops.query_vm_device_stats(vm_object, counter_id, 60)
         self.assertEqual(expected_device_stats, stats)

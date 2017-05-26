@@ -15,16 +15,14 @@
 # under the License.
 
 import cotyledon
+from cotyledon import oslo_config_glue
 from oslo_config import cfg
 from oslo_log import log
 
 from ceilometer.agent import manager
-from ceilometer.i18n import _LW
 from ceilometer import service
 
 LOG = log.getLogger(__name__)
-
-CONF = cfg.CONF
 
 
 class MultiChoicesOpt(cfg.Opt):
@@ -52,8 +50,8 @@ class DeduplicatedCfgList(cfg.types.List):
         result = super(DeduplicatedCfgList, self).__call__(*args, **kwargs)
         result_set = set(result)
         if len(result) != len(result_set):
-            LOG.warning(_LW("Duplicated values: %s found in CLI options, "
-                            "auto de-duplicated"), result)
+            LOG.warning("Duplicated values: %s found in CLI options, "
+                        "auto de-duplicated", result)
             result = list(result_set)
         if self.choices and not (result_set <= set(self.choices)):
             raise Exception('Valid values are %s, but found %s'
@@ -75,17 +73,19 @@ CLI_OPTS = [
                          'used while polling'),
 ]
 
-CONF.register_cli_opts(CLI_OPTS)
 
-
-def create_polling_service(worker_id):
-    return manager.AgentManager(CONF.polling_namespaces,
-                                CONF.pollster_list,
-                                worker_id)
+def create_polling_service(worker_id, conf):
+    return manager.AgentManager(worker_id,
+                                conf,
+                                conf.polling_namespaces,
+                                conf.pollster_list)
 
 
 def main():
-    service.prepare_service()
+    conf = cfg.ConfigOpts()
+    conf.register_cli_opts(CLI_OPTS)
+    service.prepare_service(conf=conf)
     sm = cotyledon.ServiceManager()
-    sm.add(create_polling_service)
+    sm.add(create_polling_service, args=(conf,))
+    oslo_config_glue.setup(sm, conf)
     sm.run()

@@ -22,7 +22,8 @@
 
    agent
      Software service running on the OpenStack infrastructure
-     measuring usage and sending the results to the :term:`collector`.
+     measuring usage and sending the results to any number of
+     target using the :term:`publisher`.
 
    API server
      HTTP REST API service for ceilometer.
@@ -45,13 +46,7 @@
    polling agent
      Software service running either on a central management node within the
      OpenStack infrastructure or compute node measuring usage and sending the
-     results to the :term:`collector`.
-
-   collector
-     Software service running on the OpenStack infrastructure
-     monitoring notifications from other OpenStack components and
-     samples from the ceilometer agent and recording the results
-     in the database.
+     results to a queue.
 
    notification agent
      The different OpenStack services emit several notifications about the
@@ -101,6 +96,9 @@
      The polling agent is collecting measurements by polling some API or other
      tool at a regular interval.
 
+   publisher
+     The publisher is publishing samples to a specific target.
+
    push agents
      The push agent is the only solution to fetch data within projects,
      which do not expose the required data in a remotely usable way. This
@@ -128,5 +126,5 @@
      An OpenStack user.
 
 .. [#] http://en.wikipedia.org/wiki/Ceilometer
-.. [#] https://git.openstack.org/cgit/openstack/ceilometer/tree/ceilometer/openstack/common/notifier
+.. [#] https://git.openstack.org/cgit/openstack/oslo.messaging/tree/oslo_messaging/notify/notifier.py
 .. [#] http://en.wikipedia.org/wiki/Non-repudiation

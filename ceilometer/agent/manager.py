@@ -1,6 +1,6 @@
 #
 # Copyright 2013 Julien Danjou
-# Copyright 2014 Red Hat, Inc
+# Copyright 2014-2017 Red Hat, Inc
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
@@ -16,12 +16,14 @@
 
 import collections
 import itertools
+import logging
 import random
+import uuid
 
 from concurrent import futures
+import cotyledon
 from futurist import periodics
 from keystoneauth1 import exceptions as ka_exceptions
-from keystoneclient import exceptions as ks_exceptions
 from oslo_config import cfg
 from oslo_log import log
 import oslo_messaging
@@ -30,15 +32,13 @@ from oslo_utils import timeutils
 from six import moves
 from six.moves.urllib import parse as urlparse
 from stevedore import extension
+from tooz import coordination
 
 from ceilometer.agent import plugin_base
-from ceilometer import coordination
-from ceilometer.i18n import _, _LE, _LI, _LW
 from ceilometer import keystone_client
 from ceilometer import messaging
 from ceilometer import pipeline
 from ceilometer.publisher import utils as publisher_utils
-from ceilometer import service_base
 from ceilometer import utils
 
 LOG = log.getLogger(__name__)
@@ -57,6 +57,10 @@ OPTS = [
 ]
 
 POLLING_OPTS = [
+    cfg.StrOpt('cfg_file',
+               default="polling.yaml",
+               help="Configuration file for pipeline definition."
+               ),
     cfg.StrOpt('partitioning_group_prefix',
                deprecated_group='central',
                help='Work-load partitioning group prefix. Use only if you '
@@ -65,17 +69,6 @@ POLLING_OPTS = [
                     'pool with the same partitioning_group_prefix a disjoint '
                     'subset of pollsters should be loaded.'),
 ]
-
-cfg.CONF.register_opts(OPTS)
-cfg.CONF.register_opts(POLLING_OPTS, group='polling')
-cfg.CONF.import_opt('telemetry_driver', 'ceilometer.publisher.messaging',
-                    group='publisher_notifier')
-cfg.CONF.import_group('service_types', 'ceilometer.energy.kwapi')
-cfg.CONF.import_group('service_types', 'ceilometer.image.glance')
-cfg.CONF.import_group('service_types', 'ceilometer.neutron_client')
-cfg.CONF.import_group('service_types', 'ceilometer.nova_client')
-cfg.CONF.import_group('service_types', 'ceilometer.objectstore.rgw')
-cfg.CONF.import_group('service_types', 'ceilometer.objectstore.swift')
 
 
 class PollsterListForbidden(Exception):
@@ -109,14 +102,16 @@ class Resources(object):
         source_discovery = (self.agent_manager.discover(self._discovery,
                                                         discovery_cache)
                             if self._discovery else [])
-        static_resources = []
+
         if self._resources:
             static_resources_group = self.agent_manager.construct_group_id(
                 utils.hash_of_set(self._resources))
-            p_coord = self.agent_manager.partition_coordinator
-            static_resources = p_coord.extract_my_subset(
-                static_resources_group, self._resources)
-        return static_resources + source_discovery
+            return list(filter(
+                self.agent_manager.hashrings[
+                    static_resources_group].belongs_to_self, self._resources
+            )) + source_discovery
+
+        return source_discovery
 
     @staticmethod
     def key(source_name, pollster):
@@ -141,8 +136,8 @@ class PollingTask(object):
         resource_factory = lambda: Resources(agent_manager)
         self.resources = collections.defaultdict(resource_factory)
 
-        self._batch = cfg.CONF.batch_polled_samples
-        self._telemetry_secret = cfg.CONF.publisher.telemetry_secret
+        self._batch = self.manager.conf.batch_polled_samples
+        self._telemetry_secret = self.manager.conf.publisher.telemetry_secret
 
     def add(self, pollster, source):
         self.pollster_matches[source.name].add(pollster)
@@ -179,13 +174,13 @@ class PollingTask(object):
                 # If no resources, skip for this pollster
                 if not polling_resources:
                     p_context = 'new ' if history else ''
-                    LOG.info(_LI("Skip pollster %(name)s, no %(p_context)s"
-                                 "resources found this cycle"),
+                    LOG.info("Skip pollster %(name)s, no %(p_context)s"
+                             "resources found this cycle",
                              {'name': pollster.name, 'p_context': p_context})
                     continue
 
-                LOG.info(_LI("Polling pollster %(poll)s in the context of "
-                             "%(src)s"),
+                LOG.info("Polling pollster %(poll)s in the context of "
+                         "%(src)s",
                          dict(poll=pollster.name, src=source_name))
                 try:
                     polling_timestamp = timeutils.utcnow().isoformat()
@@ -212,14 +207,15 @@ class PollingTask(object):
                         self._send_notification(sample_batch)
 
                 except plugin_base.PollsterPermanentError as err:
-                    LOG.error(_(
-                        'Prevent pollster %(name)s for '
-                        'polling source %(source)s anymore!')
-                        % ({'name': pollster.name, 'source': source_name}))
+                    LOG.error(
+                        'Prevent pollster %(name)s from '
+                        'polling %(res_list)s on source %(source)s anymore!'
+                        % ({'name': pollster.name, 'source': source_name,
+                            'res_list': err.fail_res_list}))
                     self.resources[key].blacklist.extend(err.fail_res_list)
                 except Exception as err:
-                    LOG.warning(_(
-                        'Continue after error from %(name)s: %(error)s')
+                    LOG.error(
+                        'Continue after error from %(name)s: %(error)s'
                         % ({'name': pollster.name, 'error': err}),
                         exc_info=True)
 
@@ -231,20 +227,22 @@ class PollingTask(object):
         )
 
 
-class AgentManager(service_base.PipelineBasedService):
+class AgentManager(cotyledon.Service):
 
-    def __init__(self, namespaces=None, pollster_list=None, worker_id=0):
+    def __init__(self, worker_id, conf, namespaces=None, pollster_list=None):
         namespaces = namespaces or ['compute', 'central']
         pollster_list = pollster_list or []
-        group_prefix = cfg.CONF.polling.partitioning_group_prefix
+        group_prefix = conf.polling.partitioning_group_prefix
 
         # features of using coordination and pollster-list are exclusive, and
         # cannot be used at one moment to avoid both samples duplication and
         # samples being lost
-        if pollster_list and cfg.CONF.coordination.backend_url:
+        if pollster_list and conf.coordination.backend_url:
             raise PollsterListForbidden()
 
         super(AgentManager, self).__init__(worker_id)
+
+        self.conf = conf
 
         def _match(pollster):
             """Find out if pollster name matches to one of the list."""
@@ -256,7 +254,7 @@ class AgentManager(service_base.PipelineBasedService):
 
         # we'll have default ['compute', 'central'] here if no namespaces will
         # be passed
-        extensions = (self._extensions('poll', namespace).extensions
+        extensions = (self._extensions('poll', namespace, self.conf).extensions
                       for namespace in namespaces)
         # get the extensions from pollster builder
         extensions_fb = (self._extensions_from_builder('poll', namespace)
@@ -273,16 +271,19 @@ class AgentManager(service_base.PipelineBasedService):
         if self.extensions == []:
             raise EmptyPollstersList()
 
-        discoveries = (self._extensions('discover', namespace).extensions
+        discoveries = (self._extensions('discover', namespace,
+                                        self.conf).extensions
                        for namespace in namespaces)
         self.discoveries = list(itertools.chain(*list(discoveries)))
         self.polling_periodics = None
 
-        self.partition_coordinator = coordination.PartitionCoordinator()
-        self.heartbeat_timer = utils.create_periodic(
-            target=self.partition_coordinator.heartbeat,
-            spacing=cfg.CONF.coordination.heartbeat,
-            run_immediately=True)
+        if self.conf.coordination.backend_url:
+            # XXX uuid4().bytes ought to work, but it requires ascii for now
+            coordination_id = str(uuid.uuid4()).encode('ascii')
+            self.partition_coordinator = coordination.get_coordinator(
+                self.conf.coordination.backend_url, coordination_id)
+        else:
+            self.partition_coordinator = None
 
         # Compose coordination group prefix.
         # We'll use namespaces as the basement for this partitioning.
@@ -291,46 +292,52 @@ class AgentManager(service_base.PipelineBasedService):
                              if group_prefix else namespace_prefix)
 
         self.notifier = oslo_messaging.Notifier(
-            messaging.get_transport(),
-            driver=cfg.CONF.publisher_notifier.telemetry_driver,
+            messaging.get_transport(self.conf),
+            driver=self.conf.publisher_notifier.telemetry_driver,
             publisher_id="ceilometer.polling")
 
         self._keystone = None
         self._keystone_last_exception = None
 
     @staticmethod
-    def _get_ext_mgr(namespace):
+    def _get_ext_mgr(namespace, *args, **kwargs):
         def _catch_extension_load_error(mgr, ep, exc):
             # Extension raising ExtensionLoadError can be ignored,
             # and ignore anything we can't import as a safety measure.
             if isinstance(exc, plugin_base.ExtensionLoadError):
-                LOG.exception(_("Skip loading extension for %s") % ep.name)
+                LOG.exception("Skip loading extension for %s", ep.name)
                 return
+
+            show_exception = (LOG.isEnabledFor(logging.DEBUG)
+                              and isinstance(exc, ImportError))
+            LOG.error("Failed to import extension for %(name)r: "
+                      "%(error)s",
+                      {'name': ep.name, 'error': exc},
+                      exc_info=show_exception)
             if isinstance(exc, ImportError):
-                LOG.error(_("Failed to import extension for %(name)s: "
-                            "%(error)s"),
-                          {'name': ep.name, 'error': exc})
                 return
             raise exc
 
         return extension.ExtensionManager(
             namespace=namespace,
             invoke_on_load=True,
+            invoke_args=args,
+            invoke_kwds=kwargs,
             on_load_failure_callback=_catch_extension_load_error,
         )
 
-    def _extensions(self, category, agent_ns=None):
+    def _extensions(self, category, agent_ns=None, *args, **kwargs):
         namespace = ('ceilometer.%s.%s' % (category, agent_ns) if agent_ns
                      else 'ceilometer.%s' % category)
-        return self._get_ext_mgr(namespace)
+        return self._get_ext_mgr(namespace, *args, **kwargs)
 
     def _extensions_from_builder(self, category, agent_ns=None):
         ns = ('ceilometer.builder.%s.%s' % (category, agent_ns) if agent_ns
               else 'ceilometer.builder.%s' % category)
-        mgr = self._get_ext_mgr(ns)
+        mgr = self._get_ext_mgr(ns, self.conf)
 
         def _build(ext):
-            return ext.plugin.get_pollsters_extensions()
+            return ext.plugin.get_pollsters_extensions(self.conf)
 
         # NOTE: this seems a stevedore bug. if no extensions are found,
         # map will raise runtimeError which is not documented.
@@ -340,26 +347,19 @@ class AgentManager(service_base.PipelineBasedService):
             return []
 
     def join_partitioning_groups(self):
-        self.groups = set([self.construct_group_id(d.obj.group_id)
-                          for d in self.discoveries])
+        groups = set([self.construct_group_id(d.obj.group_id)
+                      for d in self.discoveries])
         # let each set of statically-defined resources have its own group
         static_resource_groups = set([
             self.construct_group_id(utils.hash_of_set(p.resources))
             for p in self.polling_manager.sources
             if p.resources
         ])
-        self.groups.update(static_resource_groups)
+        groups.update(static_resource_groups)
 
-        if not self.groups and self.partition_coordinator.is_active():
-            self.partition_coordinator.stop()
-            self.heartbeat_timer.stop()
-
-        if self.groups and not self.partition_coordinator.is_active():
-            self.partition_coordinator.start()
-            utils.spawn_thread(self.heartbeat_timer.start)
-
-        for group in self.groups:
-            self.partition_coordinator.join_group(group)
+        self.hashrings = dict(
+            (group, self.partition_coordinator.join_partitioned_group(group))
+            for group in groups)
 
     def create_polling_task(self):
         """Create an initially empty polling task."""
@@ -379,27 +379,26 @@ class AgentManager(service_base.PipelineBasedService):
         return polling_tasks
 
     def construct_group_id(self, discovery_group_id):
-        return ('%s-%s' % (self.group_prefix,
-                           discovery_group_id)
-                if discovery_group_id else None)
+        return '%s-%s' % (self.group_prefix, discovery_group_id)
 
     def start_polling_tasks(self):
-        # NOTE(sileht): 1000 is just the same as previous oslo_service code
-        self.polling_periodics = periodics.PeriodicWorker.create(
-            [], executor_factory=lambda:
-            futures.ThreadPoolExecutor(max_workers=1000))
-
-        # allow time for coordination if necessary
-        delay_start = self.partition_coordinator.is_active()
-
         # set shuffle time before polling task if necessary
         delay_polling_time = random.randint(
-            0, cfg.CONF.shuffle_time_before_polling_task)
+            0, self.conf.shuffle_time_before_polling_task)
 
         data = self.setup_polling_tasks()
+
+        # Don't start useless threads if no task will run
+        if not data:
+            return
+
+        # One thread per polling tasks is enough
+        self.polling_periodics = periodics.PeriodicWorker.create(
+            [], executor_factory=lambda:
+            futures.ThreadPoolExecutor(max_workers=len(data)))
+
         for interval, polling_task in data.items():
-            delay_time = (interval + delay_polling_time if delay_start
-                          else delay_polling_time)
+            delay_time = interval + delay_polling_time
 
             @periodics.periodic(spacing=interval, run_immediately=False)
             def task(running_task):
@@ -408,21 +407,20 @@ class AgentManager(service_base.PipelineBasedService):
             utils.spawn_thread(utils.delayed, delay_time,
                                self.polling_periodics.add, task, polling_task)
 
-        if data:
-            # Don't start useless threads if no task will run
-            utils.spawn_thread(self.polling_periodics.start, allow_empty=True)
+        utils.spawn_thread(self.polling_periodics.start, allow_empty=True)
 
     def run(self):
         super(AgentManager, self).run()
-        self.polling_manager = pipeline.setup_polling()
-        self.join_partitioning_groups()
+        self.polling_manager = pipeline.setup_polling(self.conf)
+        if self.partition_coordinator:
+            self.partition_coordinator.start()
+            self.join_partitioning_groups()
         self.start_polling_tasks()
-        self.init_pipeline_refresh()
 
     def terminate(self):
         self.stop_pollsters_tasks()
-        self.heartbeat_timer.stop()
-        self.partition_coordinator.stop()
+        if self.partition_coordinator:
+            self.partition_coordinator.stop()
         super(AgentManager, self).terminate()
 
     def interval_task(self, task):
@@ -443,7 +441,7 @@ class AgentManager(service_base.PipelineBasedService):
         # tasks. During this short time bad thing can occur.
         #
         # I think we must not reset keystone client before
-        # running a polling task, but refresh it periodicaly instead.
+        # running a polling task, but refresh it periodically instead.
 
         # NOTE(sileht): we do lazy loading of the keystone client
         # for multiple reasons:
@@ -451,10 +449,9 @@ class AgentManager(service_base.PipelineBasedService):
         # * use only one client for all plugins per polling cycle
         if self._keystone is None and self._keystone_last_exception is None:
             try:
-                self._keystone = keystone_client.get_client()
+                self._keystone = keystone_client.get_client(self.conf)
                 self._keystone_last_exception = None
-            except (ka_exceptions.ClientException,
-                    ks_exceptions.ClientException) as e:
+            except ka_exceptions.ClientException as e:
                 self._keystone = None
                 self._keystone_last_exception = e
         if self._keystone is not None:
@@ -486,32 +483,36 @@ class AgentManager(service_base.PipelineBasedService):
                 try:
                     if discoverer.KEYSTONE_REQUIRED_FOR_SERVICE:
                         service_type = getattr(
-                            cfg.CONF.service_types,
+                            self.conf.service_types,
                             discoverer.KEYSTONE_REQUIRED_FOR_SERVICE)
                         if not keystone_client.get_service_catalog(
                                 self.keystone).get_endpoints(
                                     service_type=service_type):
-                            LOG.warning(_LW(
+                            LOG.warning(
                                 'Skipping %(name)s, %(service_type)s service '
-                                'is not registered in keystone'),
+                                'is not registered in keystone',
                                 {'name': name, 'service_type': service_type})
                             continue
 
                     discovered = discoverer.discover(self, param)
-                    partitioned = self.partition_coordinator.extract_my_subset(
-                        self.construct_group_id(discoverer.group_id),
-                        discovered)
-                    resources.extend(partitioned)
+
+                    if self.partition_coordinator:
+                        discovered = list(filter(
+                            self.hashrings[
+                                self.construct_group_id(discoverer.group_id)
+                            ].belongs_to_self, discovered
+                        ))
+
+                    resources.extend(discovered)
                     if discovery_cache is not None:
-                        discovery_cache[url] = partitioned
-                except (ka_exceptions.ClientException,
-                        ks_exceptions.ClientException) as e:
-                    LOG.error(_LE('Skipping %(name)s, keystone issue: '
-                                  '%(exc)s'), {'name': name, 'exc': e})
+                        discovery_cache[url] = discovered
+                except ka_exceptions.ClientException as e:
+                    LOG.error('Skipping %(name)s, keystone issue: '
+                              '%(exc)s', {'name': name, 'exc': e})
                 except Exception as err:
-                    LOG.exception(_('Unable to discover resources: %s') % err)
+                    LOG.exception('Unable to discover resources: %s', err)
             else:
-                LOG.warning(_('Unknown discovery extension: %s') % name)
+                LOG.warning('Unknown discovery extension: %s', name)
         return resources
 
     def stop_pollsters_tasks(self):
@@ -519,17 +520,3 @@ class AgentManager(service_base.PipelineBasedService):
             self.polling_periodics.stop()
             self.polling_periodics.wait()
         self.polling_periodics = None
-
-    def reload_pipeline(self):
-        if self.pipeline_validated:
-            LOG.info(_LI("Reconfiguring polling tasks."))
-
-            # stop existing pollsters and leave partitioning groups
-            self.stop_pollsters_tasks()
-            for group in self.groups:
-                self.partition_coordinator.leave_group(group)
-
-            # re-create partitioning groups according to pipeline
-            # and configure polling tasks with latest pipeline conf
-            self.join_partitioning_groups()
-            self.start_polling_tasks()

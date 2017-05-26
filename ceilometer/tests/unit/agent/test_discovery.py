@@ -16,25 +16,25 @@
 """
 
 import mock
-from oslo_config import fixture as fixture_config
 from oslotest import base
 
 from ceilometer.agent.discovery import endpoint
 from ceilometer.agent.discovery import localnode
 from ceilometer.hardware import discovery as hardware
+from ceilometer import service
 
 
 class TestEndpointDiscovery(base.BaseTestCase):
 
     def setUp(self):
         super(TestEndpointDiscovery, self).setUp()
-        self.discovery = endpoint.EndpointDiscovery()
+        CONF = service.prepare_service([], [])
+        CONF.set_override('interface', 'publicURL',
+                          group='service_credentials')
+        CONF.set_override('region_name', 'test-region-name',
+                          group='service_credentials')
+        self.discovery = endpoint.EndpointDiscovery(CONF)
         self.manager = mock.MagicMock()
-        self.CONF = self.useFixture(fixture_config.Config()).conf
-        self.CONF.set_override('interface', 'publicURL',
-                               group='service_credentials')
-        self.CONF.set_override('region_name', 'test-region-name',
-                               group='service_credentials')
         self.catalog = (self.manager.keystone.session.auth.get_access.
                         return_value.service_catalog)
 
@@ -62,7 +62,8 @@ class TestEndpointDiscovery(base.BaseTestCase):
 class TestLocalnodeDiscovery(base.BaseTestCase):
     def setUp(self):
         super(TestLocalnodeDiscovery, self).setUp()
-        self.discovery = localnode.LocalNodeDiscovery()
+        CONF = service.prepare_service([], [])
+        self.discovery = localnode.LocalNodeDiscovery(CONF)
         self.manager = mock.MagicMock()
 
     def test_lockalnode_discovery(self):
@@ -99,10 +100,10 @@ class TestHardwareDiscovery(base.BaseTestCase):
 
     def setUp(self):
         super(TestHardwareDiscovery, self).setUp()
-        self.discovery = hardware.NodesDiscoveryTripleO()
+        self.CONF = service.prepare_service([], [])
+        self.discovery = hardware.NodesDiscoveryTripleO(self.CONF)
         self.discovery.nova_cli = mock.MagicMock()
         self.manager = mock.MagicMock()
-        self.CONF = self.useFixture(fixture_config.Config()).conf
 
     def test_hardware_discovery(self):
         self.discovery.nova_cli.instance_get_all.return_value = [

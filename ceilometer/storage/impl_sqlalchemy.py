@@ -18,7 +18,6 @@ import datetime
 import hashlib
 import os
 
-from oslo_config import cfg
 from oslo_db import api
 from oslo_db import exception as dbexc
 from oslo_db.sqlalchemy import session as db_session
@@ -34,7 +33,7 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.sql.expression import cast
 
 import ceilometer
-from ceilometer.i18n import _, _LI
+from ceilometer.i18n import _
 from ceilometer import storage
 from ceilometer.storage import base
 from ceilometer.storage import models as api_models
@@ -220,12 +219,13 @@ class Connection(base.Connection):
         AVAILABLE_STORAGE_CAPABILITIES,
     )
 
-    def __init__(self, url):
+    def __init__(self, conf, url):
+        super(Connection, self).__init__(conf, url)
         # Set max_retries to 0, since oslo.db in certain cases may attempt
         # to retry making the db connection retried max_retries ^ 2 times
         # in failure case and db reconnection has already been implemented
         # in storage.__init__.get_connection_from_config function
-        options = dict(cfg.CONF.database.items())
+        options = dict(self.conf.database.items())
         options['max_retries'] = 0
         # oslo.db doesn't support options defined by Ceilometer
         for opt in storage.OPTS:
@@ -338,8 +338,11 @@ class Connection(base.Connection):
 
         return internal_id
 
-    @api.wrap_db_retry(retry_interval=cfg.CONF.database.retry_interval,
-                       max_retries=cfg.CONF.database.max_retries,
+    # FIXME(sileht): use set_defaults to pass cfg.CONF.database.retry_interval
+    # and cfg.CONF.database.max_retries to this method when global config
+    # have been removed (puting directly cfg.CONF don't work because and copy
+    # the default instead of the configured value)
+    @api.wrap_db_retry(retry_interval=10, max_retries=10,
                        retry_on_deadlock=True)
     def record_metering_data(self, data):
         """Write the data to the backend storage system.
@@ -382,9 +385,9 @@ class Connection(base.Connection):
             sample_q = (session.query(models.Sample)
                         .filter(models.Sample.timestamp < end))
             rows = sample_q.delete()
-            LOG.info(_LI("%d samples removed from database"), rows)
+            LOG.info("%d samples removed from database", rows)
 
-        if not cfg.CONF.sql_expire_samples_only:
+        if not self.conf.database.sql_expire_samples_only:
             with session.begin():
                 # remove Meter definitions with no matching samples
                 (session.query(models.Meter)
@@ -418,8 +421,8 @@ class Connection(base.Connection):
                               .filter(models.Resource.metadata_hash
                                       .like('delete_%')))
                 resource_q.delete(synchronize_session=False)
-            LOG.info(_LI("Expired residual resource and"
-                         " meter definition data"))
+            LOG.info("Expired residual resource and"
+                     " meter definition data")
 
     def get_resources(self, user=None, project=None, source=None,
                       start_timestamp=None, start_timestamp_op=None,
@@ -456,7 +459,7 @@ class Connection(base.Connection):
         # NOTE: When sql_expire_samples_only is enabled, there will be some
         #       resources without any sample, in such case we should use inner
         #       join on sample table to avoid wrong result.
-        if cfg.CONF.sql_expire_samples_only or has_timestamp:
+        if self.conf.database.sql_expire_samples_only or has_timestamp:
             res_q = session.query(distinct(models.Resource.resource_id)).join(
                 models.Sample,
                 models.Sample.resource_id == models.Resource.internal_id)

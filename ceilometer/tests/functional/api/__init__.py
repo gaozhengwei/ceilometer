@@ -15,16 +15,11 @@
 """Base classes for API tests.
 """
 
-from oslo_config import cfg
-from oslo_config import fixture as fixture_config
-from oslo_policy import opts
 import pecan
 import pecan.testing
 
-from ceilometer.api import rbac
+from ceilometer import service
 from ceilometer.tests import db as db_test_base
-
-cfg.CONF.import_group('api', 'ceilometer.api.controllers.v2.root')
 
 
 class FunctionalTest(db_test_base.TestBase):
@@ -38,9 +33,8 @@ class FunctionalTest(db_test_base.TestBase):
 
     def setUp(self):
         super(FunctionalTest, self).setUp()
-        self.CONF = self.useFixture(fixture_config.Config()).conf
+        self.CONF = service.prepare_service([], [])
         self.setup_messaging(self.CONF)
-        opts.set_defaults(self.CONF)
 
         self.CONF.set_override("policy_file",
                                self.path_get('etc/ceilometer/policy.json'),
@@ -48,6 +42,7 @@ class FunctionalTest(db_test_base.TestBase):
 
         self.CONF.set_override('gnocchi_is_enabled', False, group='api')
         self.CONF.set_override('aodh_is_enabled', False, group='api')
+        self.CONF.set_override('panko_is_enabled', False, group='api')
 
         self.app = self._make_app()
 
@@ -63,11 +58,10 @@ class FunctionalTest(db_test_base.TestBase):
             },
         }
 
-        return pecan.testing.load_test_app(self.config)
+        return pecan.testing.load_test_app(self.config, conf=self.CONF)
 
     def tearDown(self):
         super(FunctionalTest, self).tearDown()
-        rbac.reset()
         pecan.set_config({}, overwrite=True)
 
     def put_json(self, path, params, expect_errors=False, headers=None,

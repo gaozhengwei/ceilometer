@@ -15,130 +15,51 @@
 """Implementation of Inspector abstraction for libvirt."""
 
 from lxml import etree
-from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_utils import units
 import six
 
+try:
+    import libvirt
+except ImportError:
+    libvirt = None
+
 from ceilometer.compute.pollsters import util
 from ceilometer.compute.virt import inspector as virt_inspector
-from ceilometer.i18n import _LW, _
-
-libvirt = None
+from ceilometer.compute.virt.libvirt import utils as libvirt_utils
+from ceilometer.i18n import _
 
 LOG = logging.getLogger(__name__)
-
-OPTS = [
-    cfg.StrOpt('libvirt_type',
-               default='kvm',
-               choices=['kvm', 'lxc', 'qemu', 'uml', 'xen'],
-               help='Libvirt domain type.'),
-    cfg.StrOpt('libvirt_uri',
-               default='',
-               help='Override the default libvirt URI '
-                    '(which is dependent on libvirt_type).'),
-]
-
-CONF = cfg.CONF
-CONF.register_opts(OPTS)
-
-
-def retry_on_disconnect(function):
-    def decorator(self, *args, **kwargs):
-        try:
-            return function(self, *args, **kwargs)
-        except ImportError:
-            # NOTE(sileht): in case of libvirt failed to be imported
-            raise
-        except libvirt.libvirtError as e:
-            if (e.get_error_code() in (libvirt.VIR_ERR_SYSTEM_ERROR,
-                                       libvirt.VIR_ERR_INTERNAL_ERROR) and
-                e.get_error_domain() in (libvirt.VIR_FROM_REMOTE,
-                                         libvirt.VIR_FROM_RPC)):
-                LOG.debug('Connection to libvirt broken')
-                self.connection = None
-                return function(self, *args, **kwargs)
-            else:
-                raise
-    return decorator
 
 
 class LibvirtInspector(virt_inspector.Inspector):
 
-    per_type_uris = dict(uml='uml:///system', xen='xen:///', lxc='lxc:///')
+    def __init__(self, conf):
+        super(LibvirtInspector, self).__init__(conf)
+        # NOTE(sileht): create a connection on startup
+        self.connection
 
-    def __init__(self):
-        self.uri = self._get_uri()
-        self.connection = None
+    @property
+    def connection(self):
+        return libvirt_utils.refresh_libvirt_connection(self.conf, self)
 
-    def _get_uri(self):
-        return CONF.libvirt_uri or self.per_type_uris.get(CONF.libvirt_type,
-                                                          'qemu:///system')
-
-    def _get_connection(self):
-        if not self.connection:
-            global libvirt
-            if libvirt is None:
-                libvirt = __import__('libvirt')
-            LOG.debug('Connecting to libvirt: %s', self.uri)
-            self.connection = libvirt.openReadOnly(self.uri)
-
-        return self.connection
-
-    def check_sanity(self):
-        if not self._get_connection():
-            raise virt_inspector.NoSanityException()
-
-    @retry_on_disconnect
     def _lookup_by_uuid(self, instance):
         instance_name = util.instance_name(instance)
         try:
-            return self._get_connection().lookupByUUIDString(instance.id)
-        except Exception as ex:
-            if not libvirt or not isinstance(ex, libvirt.libvirtError):
-                raise virt_inspector.InspectorException(six.text_type(ex))
-            error_code = ex.get_error_code()
-            if (error_code in (libvirt.VIR_ERR_SYSTEM_ERROR,
-                               libvirt.VIR_ERR_INTERNAL_ERROR) and
-                ex.get_error_domain() in (libvirt.VIR_FROM_REMOTE,
-                                          libvirt.VIR_FROM_RPC)):
+            return self.connection.lookupByUUIDString(instance.id)
+        except libvirt.libvirtError as ex:
+            if libvirt_utils.is_disconnection_exception(ex):
                 raise
             msg = _("Error from libvirt while looking up instance "
                     "<name=%(name)s, id=%(id)s>: "
                     "[Error Code %(error_code)s] "
                     "%(ex)s") % {'name': instance_name,
                                  'id': instance.id,
-                                 'error_code': error_code,
+                                 'error_code': ex.get_error_code(),
                                  'ex': ex}
             raise virt_inspector.InstanceNotFoundException(msg)
-
-    def inspect_cpus(self, instance):
-        domain = self._get_domain_not_shut_off_or_raise(instance)
-        dom_info = domain.info()
-        return virt_inspector.CPUStats(number=dom_info[3], time=dom_info[4])
-
-    def inspect_cpu_l3_cache(self, instance):
-        domain = self._lookup_by_uuid(instance)
-        try:
-            stats = self.connection.domainListGetStats(
-                [domain], libvirt.VIR_DOMAIN_STATS_PERF)
-            perf = stats[0][1]
-            usage = perf["perf.cmt"]
-            return virt_inspector.CPUL3CacheUsageStats(l3_cache_usage=usage)
-        except AttributeError as e:
-            msg = _('Perf is not supported by current version of libvirt, and '
-                    'failed to inspect l3 cache usage of %(instance_uuid)s, '
-                    'can not get info from libvirt: %(error)s') % {
-                'instance_uuid': instance.id, 'error': e}
-            raise virt_inspector.NoDataException(msg)
-        # domainListGetStats might launch an exception if the method or
-        # cmt perf event is not supported by the underlying hypervisor
-        # being used by libvirt.
-        except libvirt.libvirtError as e:
-            msg = _('Failed to inspect l3 cache usage of %(instance_uuid)s, '
-                    'can not get info from libvirt: %(error)s') % {
-                'instance_uuid': instance.id, 'error': e}
-            raise virt_inspector.NoDataException(msg)
+        except Exception as ex:
+            raise virt_inspector.InspectorException(six.text_type(ex))
 
     def _get_domain_not_shut_off_or_raise(self, instance):
         instance_name = util.instance_name(instance)
@@ -154,7 +75,8 @@ class LibvirtInspector(virt_inspector.Inspector):
 
         return domain
 
-    def inspect_vnics(self, instance):
+    @libvirt_utils.retry_on_disconnect
+    def inspect_vnics(self, instance, duration):
         domain = self._get_domain_not_shut_off_or_raise(instance)
 
         tree = etree.fromstring(domain.XMLDesc(0))
@@ -175,16 +97,22 @@ class LibvirtInspector(virt_inspector.Inspector):
 
             params = dict((p.get('name').lower(), p.get('value'))
                           for p in iface.findall('filterref/parameter'))
-            interface = virt_inspector.Interface(name=name, mac=mac_address,
-                                                 fref=fref, parameters=params)
             dom_stats = domain.interfaceStats(name)
-            stats = virt_inspector.InterfaceStats(rx_bytes=dom_stats[0],
-                                                  rx_packets=dom_stats[1],
-                                                  tx_bytes=dom_stats[4],
-                                                  tx_packets=dom_stats[5])
-            yield (interface, stats)
+            yield virt_inspector.InterfaceStats(name=name,
+                                                mac=mac_address,
+                                                fref=fref,
+                                                parameters=params,
+                                                rx_bytes=dom_stats[0],
+                                                rx_packets=dom_stats[1],
+                                                rx_drop=dom_stats[2],
+                                                rx_errors=dom_stats[3],
+                                                tx_bytes=dom_stats[4],
+                                                tx_packets=dom_stats[5],
+                                                tx_drop=dom_stats[6],
+                                                tx_errors=dom_stats[7])
 
-    def inspect_disks(self, instance):
+    @libvirt_utils.retry_on_disconnect
+    def inspect_disks(self, instance, duration):
         domain = self._get_domain_not_shut_off_or_raise(instance)
 
         tree = etree.fromstring(domain.XMLDesc(0))
@@ -192,44 +120,16 @@ class LibvirtInspector(virt_inspector.Inspector):
                 bool,
                 [target.get("dev")
                  for target in tree.findall('devices/disk/target')]):
-            disk = virt_inspector.Disk(device=device)
             block_stats = domain.blockStats(device)
-            stats = virt_inspector.DiskStats(read_requests=block_stats[0],
-                                             read_bytes=block_stats[1],
-                                             write_requests=block_stats[2],
-                                             write_bytes=block_stats[3],
-                                             errors=block_stats[4])
-            yield (disk, stats)
+            yield virt_inspector.DiskStats(device=device,
+                                           read_requests=block_stats[0],
+                                           read_bytes=block_stats[1],
+                                           write_requests=block_stats[2],
+                                           write_bytes=block_stats[3],
+                                           errors=block_stats[4])
 
-    def inspect_memory_usage(self, instance, duration=None):
-        instance_name = util.instance_name(instance)
-        domain = self._get_domain_not_shut_off_or_raise(instance)
-
-        try:
-            memory_stats = domain.memoryStats()
-            if (memory_stats and
-                    memory_stats.get('available') and
-                    memory_stats.get('unused')):
-                memory_used = (memory_stats.get('available') -
-                               memory_stats.get('unused'))
-                # Stat provided from libvirt is in KB, converting it to MB.
-                memory_used = memory_used / units.Ki
-                return virt_inspector.MemoryUsageStats(usage=memory_used)
-            else:
-                msg = _('Failed to inspect memory usage of instance '
-                        '<name=%(name)s, id=%(id)s>, '
-                        'can not get info from libvirt.') % {
-                    'name': instance_name, 'id': instance.id}
-                raise virt_inspector.InstanceNoDataException(msg)
-        # memoryStats might launch an exception if the method is not supported
-        # by the underlying hypervisor being used by libvirt.
-        except libvirt.libvirtError as e:
-            msg = _('Failed to inspect memory usage of %(instance_uuid)s, '
-                    'can not get info from libvirt: %(error)s') % {
-                'instance_uuid': instance.id, 'error': e}
-            raise virt_inspector.NoDataException(msg)
-
-    def inspect_disk_info(self, instance):
+    @libvirt_utils.retry_on_disconnect
+    def inspect_disk_info(self, instance, duration):
         domain = self._get_domain_not_shut_off_or_raise(instance)
         tree = etree.fromstring(domain.XMLDesc(0))
         for disk in tree.findall('devices/disk'):
@@ -237,21 +137,72 @@ class LibvirtInspector(virt_inspector.Inspector):
             if disk_type:
                 if disk_type == 'network':
                     LOG.warning(
-                        _LW('Inspection disk usage of network disk '
-                            '%(instance_uuid)s unsupported by libvirt') % {
+                        'Inspection disk usage of network disk '
+                        '%(instance_uuid)s unsupported by libvirt' % {
                             'instance_uuid': instance.id})
+                    continue
+                # NOTE(lhx): "cdrom" device associated to the configdrive
+                # no longer has a "source" element. Releated bug:
+                # https://bugs.launchpad.net/ceilometer/+bug/1622718
+                if disk.find('source') is None:
                     continue
                 target = disk.find('target')
                 device = target.get('dev')
                 if device:
-                    dsk = virt_inspector.Disk(device=device)
                     block_info = domain.blockInfo(device)
-                    info = virt_inspector.DiskInfo(capacity=block_info[0],
-                                                   allocation=block_info[1],
-                                                   physical=block_info[2])
-                    yield (dsk, info)
+                    yield virt_inspector.DiskInfo(device=device,
+                                                  capacity=block_info[0],
+                                                  allocation=block_info[1],
+                                                  physical=block_info[2])
 
-    def inspect_memory_resident(self, instance, duration=None):
+    @libvirt_utils.raise_nodata_if_unsupported
+    @libvirt_utils.retry_on_disconnect
+    def inspect_instance(self, instance,  duration=None):
         domain = self._get_domain_not_shut_off_or_raise(instance)
-        memory = domain.memoryStats()['rss'] / units.Ki
-        return virt_inspector.MemoryResidentStats(resident=memory)
+
+        memory_used = memory_resident = None
+        memory_stats = domain.memoryStats()
+        # Stat provided from libvirt is in KB, converting it to MB.
+        if 'available' in memory_stats and 'unused' in memory_stats:
+            memory_used = (memory_stats['available'] -
+                           memory_stats['unused']) / units.Ki
+        if 'rss' in memory_stats:
+            memory_resident = memory_stats['rss'] / units.Ki
+
+        # TODO(sileht): stats also have the disk/vnic info
+        # we could use that instead of the old method for Queen
+        stats = self.connection.domainListGetStats([domain], 0)[0][1]
+        cpu_time = 0
+        current_cpus = stats.get('vcpu.current')
+        # Iterate over the maximum number of CPUs here, and count the
+        # actual number encountered, since the vcpu.x structure can
+        # have holes according to
+        # https://libvirt.org/git/?p=libvirt.git;a=blob;f=src/libvirt-domain.c
+        # virConnectGetAllDomainStats()
+        for vcpu in six.moves.range(stats.get('vcpu.maximum', 0)):
+            try:
+                cpu_time += (stats.get('vcpu.%s.time' % vcpu) +
+                             stats.get('vcpu.%s.wait' % vcpu))
+                current_cpus -= 1
+            except TypeError:
+                # pass here, if there are too many holes, the cpu count will
+                # not match, so don't need special error handling.
+                pass
+
+        if current_cpus:
+            # There wasn't enough data, so fall back
+            cpu_time = stats.get('cpu.time')
+
+        return virt_inspector.InstanceStats(
+            cpu_number=stats.get('vcpu.current'),
+            cpu_time=cpu_time,
+            memory_usage=memory_used,
+            memory_resident=memory_resident,
+            cpu_cycles=stats.get("perf.cpu_cycles"),
+            instructions=stats.get("perf.instructions"),
+            cache_references=stats.get("perf.cache_references"),
+            cache_misses=stats.get("perf.cache_misses"),
+            memory_bandwidth_total=stats.get("perf.mbmt"),
+            memory_bandwidth_local=stats.get("perf.mbml"),
+            cpu_l3_cache_usage=stats.get("perf.cmt"),
+        )

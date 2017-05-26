@@ -13,14 +13,15 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import fixtures
 import mock
 from oslotest import base
-from oslotest import mockpatch
 
 from ceilometer.agent import manager
 from ceilometer.agent import plugin_base
 from ceilometer.network.services import discovery
 from ceilometer.network.services import vpnaas
+from ceilometer import service
 
 
 class _BaseTestVPNPollster(base.BaseTestCase):
@@ -29,7 +30,8 @@ class _BaseTestVPNPollster(base.BaseTestCase):
     def setUp(self):
         super(_BaseTestVPNPollster, self).setUp()
         self.addCleanup(mock.patch.stopall)
-        self.manager = manager.AgentManager()
+        self.CONF = service.prepare_service([], [])
+        self.manager = manager.AgentManager(0, self.CONF)
         plugin_base._get_keystone = mock.Mock()
         catalog = (plugin_base._get_keystone.session.auth.get_access.
                    return_value.service_catalog)
@@ -41,11 +43,11 @@ class TestVPNServicesPollster(_BaseTestVPNPollster):
 
     def setUp(self):
         super(TestVPNServicesPollster, self).setUp()
-        self.pollster = vpnaas.VPNServicesPollster()
+        self.pollster = vpnaas.VPNServicesPollster(self.CONF)
         fake_vpn = self.fake_get_vpn_service()
-        self.useFixture(mockpatch.Patch('ceilometer.neutron_client.Client.'
-                                        'vpn_get_all',
-                                        return_value=fake_vpn))
+        self.useFixture(fixtures.MockPatch('ceilometer.neutron_client.Client.'
+                                           'vpn_get_all',
+                                           return_value=fake_vpn))
 
     @staticmethod
     def fake_get_vpn_service():
@@ -108,8 +110,8 @@ class TestVPNServicesPollster(_BaseTestVPNPollster):
                          set([s.name for s in samples]))
 
     def test_vpn_discovery(self):
-        discovered_vpns = discovery.VPNServicesDiscovery().discover(
-            self.manager)
+        discovered_vpns = discovery.VPNServicesDiscovery(
+            self.CONF).discover(self.manager)
         self.assertEqual(3, len(discovered_vpns))
 
         for vpn in self.fake_get_vpn_service():
@@ -123,11 +125,11 @@ class TestIPSecConnectionsPollster(_BaseTestVPNPollster):
 
     def setUp(self):
         super(TestIPSecConnectionsPollster, self).setUp()
-        self.pollster = vpnaas.IPSecConnectionsPollster()
+        self.pollster = vpnaas.IPSecConnectionsPollster(self.CONF)
         fake_conns = self.fake_get_ipsec_connections()
-        self.useFixture(mockpatch.Patch('ceilometer.neutron_client.Client.'
-                                        'ipsec_site_connections_get_all',
-                                        return_value=fake_conns))
+        self.useFixture(fixtures.MockPatch('ceilometer.neutron_client.Client.'
+                                           'ipsec_site_connections_get_all',
+                                           return_value=fake_conns))
 
     @staticmethod
     def fake_get_ipsec_connections():
@@ -170,7 +172,7 @@ class TestIPSecConnectionsPollster(_BaseTestVPNPollster):
                          set([s.name for s in samples]))
 
     def test_conns_discovery(self):
-        discovered_conns = discovery.IPSecConnectionsDiscovery().discover(
-            self.manager)
+        discovered_conns = discovery.IPSecConnectionsDiscovery(
+            self.CONF).discover(self.manager)
         self.assertEqual(1, len(discovered_conns))
         self.assertEqual(self.fake_get_ipsec_connections(), discovered_conns)

@@ -12,16 +12,15 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import fixtures
 import mock
-
-from oslo_config import cfg
 from oslotest import base
-from oslotest import mockpatch
 
 from ceilometer.agent import manager
 from ceilometer.agent import plugin_base
 from ceilometer.network.services import discovery
 from ceilometer.network.services import lbaas
+from ceilometer import service
 
 
 class _BaseTestLBPollster(base.BaseTestCase):
@@ -30,7 +29,8 @@ class _BaseTestLBPollster(base.BaseTestCase):
     def setUp(self):
         super(_BaseTestLBPollster, self).setUp()
         self.addCleanup(mock.patch.stopall)
-        self.manager = manager.AgentManager()
+        self.CONF = service.prepare_service([], [])
+        self.manager = manager.AgentManager(0, self.CONF)
         plugin_base._get_keystone = mock.Mock()
         catalog = (plugin_base._get_keystone.session.auth.get_access.
                    return_value.service_catalog)
@@ -42,12 +42,12 @@ class TestLBListenerPollster(_BaseTestLBPollster):
 
     def setUp(self):
         super(TestLBListenerPollster, self).setUp()
-        self.pollster = lbaas.LBListenerPollster()
+        self.pollster = lbaas.LBListenerPollster(self.CONF)
         self.pollster.lb_version = 'v2'
         fake_listeners = self.fake_list_listeners()
-        self.useFixture(mockpatch.Patch('ceilometer.neutron_client.Client.'
-                                        'list_listener',
-                                        return_value=fake_listeners))
+        self.useFixture(fixtures.MockPatch('ceilometer.neutron_client.Client.'
+                                           'list_listener',
+                                           return_value=fake_listeners))
 
     @staticmethod
     def fake_list_listeners():
@@ -126,8 +126,8 @@ class TestLBListenerPollster(_BaseTestLBPollster):
                          set([s.name for s in samples]))
 
     def test_listener_discovery(self):
-        discovered_listeners = discovery.LBListenersDiscovery().discover(
-            self.manager)
+        discovered_listeners = discovery.LBListenersDiscovery(
+            self.CONF).discover(self.manager)
         self.assertEqual(4, len(discovered_listeners))
         for listener in self.fake_list_listeners():
             if listener['operating_status'] == 'pending_create':
@@ -140,12 +140,12 @@ class TestLBLoadBalancerPollster(_BaseTestLBPollster):
 
     def setUp(self):
         super(TestLBLoadBalancerPollster, self).setUp()
-        self.pollster = lbaas.LBLoadBalancerPollster()
+        self.pollster = lbaas.LBLoadBalancerPollster(self.CONF)
         self.pollster.lb_version = 'v2'
         fake_loadbalancers = self.fake_list_loadbalancers()
-        self.useFixture(mockpatch.Patch('ceilometer.neutron_client.Client.'
-                                        'list_loadbalancer',
-                                        return_value=fake_loadbalancers))
+        self.useFixture(fixtures.MockPatch('ceilometer.neutron_client.Client.'
+                                           'list_loadbalancer',
+                                           return_value=fake_loadbalancers))
 
     @staticmethod
     def fake_list_loadbalancers():
@@ -216,8 +216,8 @@ class TestLBLoadBalancerPollster(_BaseTestLBPollster):
                          set([s.name for s in samples]))
 
     def test_loadbalancer_discovery(self):
-        discovered_loadbalancers = \
-            discovery.LBLoadBalancersDiscovery().discover(self.manager)
+        discovered_loadbalancers = discovery.LBLoadBalancersDiscovery(
+            self.CONF).discover(self.manager)
         self.assertEqual(4, len(discovered_loadbalancers))
         for loadbalancer in self.fake_list_loadbalancers():
             if loadbalancer['operating_status'] == 'pending_create':
@@ -231,17 +231,17 @@ class TestLBStatsPollster(_BaseTestLBPollster):
     def setUp(self):
         super(TestLBStatsPollster, self).setUp()
         fake_balancer_stats = self.fake_balancer_stats()
-        self.useFixture(mockpatch.Patch('ceilometer.neutron_client.Client.'
-                                        'get_loadbalancer_stats',
-                                        return_value=fake_balancer_stats))
+        self.useFixture(fixtures.MockPatch('ceilometer.neutron_client.Client.'
+                                           'get_loadbalancer_stats',
+                                           return_value=fake_balancer_stats))
 
         fake_loadbalancers = self.fake_list_loadbalancers()
-        self.useFixture(mockpatch.Patch('ceilometer.neutron_client.Client.'
-                                        'list_loadbalancer',
-                                        return_value=fake_loadbalancers))
-        cfg.CONF.set_override('neutron_lbaas_version',
-                              'v2',
-                              group='service_types')
+        self.useFixture(fixtures.MockPatch('ceilometer.neutron_client.Client.'
+                                           'list_loadbalancer',
+                                           return_value=fake_loadbalancers))
+        self.CONF.set_override('neutron_lbaas_version',
+                               'v2',
+                               group='service_types')
 
     @staticmethod
     def fake_list_loadbalancers():
@@ -267,7 +267,7 @@ class TestLBStatsPollster(_BaseTestLBPollster):
     @mock.patch('ceilometer.pipeline.setup_pipeline', mock.MagicMock())
     def _check_get_samples(self, factory, sample_name, expected_volume,
                            expected_type):
-        pollster = factory()
+        pollster = factory(self.CONF)
 
         cache = {}
         samples = list(pollster.get_samples(self.manager, cache,

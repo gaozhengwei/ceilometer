@@ -14,9 +14,8 @@ import time
 
 from oslo_utils import timeutils
 from tempest.common import compute
-from tempest.common.utils import data_utils
 from tempest import config
-from tempest import exceptions
+from tempest.lib.common.utils import data_utils
 from tempest.lib import exceptions as lib_exc
 import tempest.test
 
@@ -33,7 +32,6 @@ class ClientManager(client.Manager):
         'compute_networks_client',
         'compute_floating_ips_client',
         'flavors_client',
-        'image_client',
         'image_client_v2',
         'telemetry_client',
     ]
@@ -49,8 +47,9 @@ class BaseTelemetryTest(tempest.test.BaseTestCase):
     @classmethod
     def skip_checks(cls):
         super(BaseTelemetryTest, cls).skip_checks()
-        if not CONF.service_available.ceilometer:
-            raise cls.skipException("Ceilometer support is required")
+        if (not CONF.service_available.ceilometer or
+                not CONF.telemetry.deprecated_api_enabled):
+            raise cls.skipException("Ceilometer API support is required")
 
     @classmethod
     def setup_credentials(cls):
@@ -63,7 +62,6 @@ class BaseTelemetryTest(tempest.test.BaseTestCase):
         cls.telemetry_client = cls.os_primary.telemetry_client
         cls.servers_client = cls.os_primary.servers_client
         cls.flavors_client = cls.os_primary.flavors_client
-        cls.image_client = cls.os_primary.image_client
         cls.image_client_v2 = cls.os_primary.image_client_v2
 
     @classmethod
@@ -71,8 +69,6 @@ class BaseTelemetryTest(tempest.test.BaseTestCase):
         super(BaseTelemetryTest, cls).resource_setup()
         cls.nova_notifications = ['memory', 'vcpus', 'disk.root.size',
                                   'disk.ephemeral.size']
-
-        cls.glance_notifications = ['image.size']
 
         cls.glance_v2_notifications = ['image.download', 'image.serve']
 
@@ -115,7 +111,7 @@ class BaseTelemetryTest(tempest.test.BaseTestCase):
     @classmethod
     def resource_cleanup(cls):
         cls.cleanup_resources(cls.servers_client.delete_server, cls.server_ids)
-        cls.cleanup_resources(cls.image_client.delete_image, cls.image_ids)
+        cls.cleanup_resources(cls.image_client_v2.delete_image, cls.image_ids)
         super(BaseTelemetryTest, cls).resource_cleanup()
 
     def await_samples(self, metric, query):
@@ -132,7 +128,7 @@ class BaseTelemetryTest(tempest.test.BaseTestCase):
                 return body
             time.sleep(CONF.compute.build_interval)
 
-        raise exceptions.TimeoutException(
+        raise lib_exc.TimeoutException(
             'Sample for metric:%s with query:%s has not been added to the '
             'database within %d seconds' % (metric, query,
                                             CONF.compute.build_timeout))
@@ -147,16 +143,3 @@ class BaseTelemetryAdminTest(BaseTelemetryTest):
     def setup_clients(cls):
         super(BaseTelemetryAdminTest, cls).setup_clients()
         cls.telemetry_admin_client = cls.os_adm.telemetry_client
-
-    def await_events(self, query):
-        timeout = CONF.compute.build_timeout
-        start = timeutils.utcnow()
-        while timeutils.delta_seconds(start, timeutils.utcnow()) < timeout:
-            body = self.telemetry_admin_client.list_events(query)
-            if body:
-                return body
-            time.sleep(CONF.compute.build_interval)
-
-        raise exceptions.TimeoutException(
-            'Event with query:%s has not been added to the '
-            'database within %d seconds' % (query, CONF.compute.build_timeout))

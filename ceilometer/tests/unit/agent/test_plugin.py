@@ -14,17 +14,12 @@
 # under the License.
 
 import mock
-from oslo_config import fixture as fixture_config
 from oslotest import base
 
 from ceilometer.agent import plugin_base
 
 
 class NotificationBaseTestCase(base.BaseTestCase):
-    def setUp(self):
-        super(NotificationBaseTestCase, self).setUp()
-        self.CONF = self.useFixture(fixture_config.Config()).conf
-
     class FakePlugin(plugin_base.NotificationBase):
         event_types = ['compute.*']
 

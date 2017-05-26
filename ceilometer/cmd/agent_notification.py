@@ -15,18 +15,17 @@
 # under the License.
 
 import cotyledon
-from oslo_config import cfg
+from cotyledon import oslo_config_glue
 
 from ceilometer import notification
 from ceilometer import service
 
-CONF = cfg.CONF
-
 
 def main():
-    service.prepare_service()
+    conf = service.prepare_service()
 
     sm = cotyledon.ServiceManager()
     sm.add(notification.NotificationService,
-           workers=CONF.notification.workers)
+           workers=conf.notification.workers, args=(conf,))
+    oslo_config_glue.setup(sm, conf)
     sm.run()

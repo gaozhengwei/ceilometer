@@ -15,8 +15,10 @@
 #    under the License.
 
 from oslo_log import log as logging
-from tempest.common.utils import data_utils
 from tempest import config
+from tempest.lib.common.utils import data_utils
+from tempest.lib.common.utils import test_utils
+from tempest.lib import decorators
 from tempest import test
 
 from ceilometer.tests.tempest.service import client
@@ -25,15 +27,6 @@ from ceilometer.tests.tempest.service import client
 CONF = config.CONF
 
 LOG = logging.getLogger(__name__)
-
-# Loop for up to 120 seconds waiting on notifications
-# NOTE(chdent): The choice of 120 seconds is fairly
-# arbitrary: Long enough to give the notifications the
-# chance to travel across a highly latent bus but not
-# so long as to allow excessive latency to never be visible.
-# TODO(chdent): Ideally this value would come from configuration.
-NOTIFICATIONS_WAIT = 120
-NOTIFICATIONS_SLEEP = 1
 
 
 class ClientManager(client.Manager):
@@ -60,6 +53,11 @@ class TestObjectStorageTelemetry(test.BaseTestCase):
     @classmethod
     def skip_checks(cls):
         super(TestObjectStorageTelemetry, cls).skip_checks()
+        if ("gnocchi" in CONF.service_available and
+                CONF.service_available.gnocchi):
+            skip_msg = ("%s skipped as gnocchi is enabled" %
+                        cls.__name__)
+            raise cls.skipException(skip_msg)
         if not CONF.service_available.swift:
             skip_msg = ("%s skipped as swift is not available" %
                         cls.__name__)
@@ -113,11 +111,12 @@ class TestObjectStorageTelemetry(test.BaseTestCase):
 
             return (container_name in containers and obj_name in objects)
 
-        self.assertTrue(test.call_until_true(_check_samples,
-                                             NOTIFICATIONS_WAIT,
-                                             NOTIFICATIONS_SLEEP),
-                        'Correct notifications were not received after '
-                        '%s seconds.' % NOTIFICATIONS_WAIT)
+        self.assertTrue(
+            test_utils.call_until_true(_check_samples,
+                                       CONF.telemetry.notification_wait,
+                                       CONF.telemetry.notification_sleep),
+            'Correct notifications were not received after '
+            '%s seconds.' % CONF.telemetry.notification_wait)
 
     def create_container(self):
         name = data_utils.rand_name('swift-scenario-container')
@@ -138,7 +137,7 @@ class TestObjectStorageTelemetry(test.BaseTestCase):
                         obj_name)
         return obj_name
 
-    @test.idempotent_id('6d6b88e5-3e38-41bc-b34a-79f713a6cb85')
+    @decorators.idempotent_id('6d6b88e5-3e38-41bc-b34a-79f713a6cb85')
     @test.services('object_storage')
     def test_swift_middleware_notifies(self):
         container_name = self.create_container()

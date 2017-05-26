@@ -22,6 +22,7 @@ import six
 
 from ceilometer.agent import manager
 from ceilometer.compute.pollsters import util
+from ceilometer import service
 
 
 class FauxInstance(object):
@@ -44,7 +45,8 @@ class TestLocationMetadata(base.BaseTestCase):
 
     @mock.patch('ceilometer.pipeline.setup_pipeline', mock.MagicMock())
     def setUp(self):
-        self.manager = manager.AgentManager()
+        self.CONF = service.prepare_service([], [])
+        self.manager = manager.AgentManager(0, self.CONF)
         super(TestLocationMetadata, self).setUp()
 
         # Mimics an instance returned from nova api call
@@ -82,7 +84,7 @@ class TestLocationMetadata(base.BaseTestCase):
         self.instance = FauxInstance(**self.INSTANCE_PROPERTIES)
 
     def test_metadata(self):
-        md = util._get_metadata_from_object(self.instance)
+        md = util._get_metadata_from_object(self.CONF, self.instance)
         for prop, value in six.iteritems(self.INSTANCE_PROPERTIES):
             if prop not in ("metadata"):
                 # Special cases
@@ -106,7 +108,7 @@ class TestLocationMetadata(base.BaseTestCase):
     def test_metadata_empty_image(self):
         self.INSTANCE_PROPERTIES['image'] = None
         self.instance = FauxInstance(**self.INSTANCE_PROPERTIES)
-        md = util._get_metadata_from_object(self.instance)
+        md = util._get_metadata_from_object(self.CONF, self.instance)
         self.assertIsNone(md['image'])
         self.assertIsNone(md['image_ref'])
         self.assertIsNone(md['image_ref_url'])
@@ -115,6 +117,6 @@ class TestLocationMetadata(base.BaseTestCase):
         # There should be no links here, should default to None
         self.INSTANCE_PROPERTIES['image'] = {'id': 1}
         self.instance = FauxInstance(**self.INSTANCE_PROPERTIES)
-        md = util._get_metadata_from_object(self.instance)
+        md = util._get_metadata_from_object(self.CONF, self.instance)
         self.assertEqual(1, md['image_ref'])
         self.assertIsNone(md['image_ref_url'])

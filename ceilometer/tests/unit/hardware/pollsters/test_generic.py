@@ -17,14 +17,14 @@ import mock
 import six
 import yaml
 
-from oslo_config import fixture as fixture_config
+import fixtures
 from oslo_utils import fileutils
-from oslotest import mockpatch
 
 from ceilometer import declarative
 from ceilometer.hardware.inspector import base as inspector_base
 from ceilometer.hardware.pollsters import generic
 from ceilometer import sample
+from ceilometer import service
 from ceilometer.tests import base as test_base
 
 
@@ -109,13 +109,12 @@ class TestGenericPollsters(test_base.BaseTestCase):
 
     def setUp(self):
         super(TestGenericPollsters, self).setUp()
-        self.conf = self.useFixture(fixture_config.Config()).conf
+        self.conf = service.prepare_service([], [])
         self.resources = ["snmp://test", "snmp://test2"]
-        self.useFixture(mockpatch.Patch(
+        self.useFixture(fixtures.MockPatch(
             'ceilometer.hardware.inspector.get_inspector',
             self.faux_get_inspector))
-        self.conf(args=[])
-        self.pollster = generic.GenericHardwareDeclarativePollster()
+        self.pollster = generic.GenericHardwareDeclarativePollster(self.conf)
 
     def _setup_meter_def_file(self, cfg):
         if six.PY3:
@@ -127,7 +126,7 @@ class TestGenericPollsters(test_base.BaseTestCase):
             'meter_definitions_file',
             meter_cfg_file, group='hardware')
         cfg = declarative.load_definitions(
-            {}, self.conf.hardware.meter_definitions_file)
+            self.conf, {}, self.conf.hardware.meter_definitions_file)
         return cfg
 
     def _check_get_samples(self, name, definition,
@@ -179,7 +178,7 @@ class TestGenericPollsters(test_base.BaseTestCase):
         pollster = generic.GenericHardwareDeclarativePollster
         # Clear cached mapping
         pollster.mapping = None
-        exts = pollster.get_pollsters_extensions()
+        exts = pollster.get_pollsters_extensions(self.conf)
         self.assertEqual(2, len(exts))
         self.assertIn(exts[0].name, ['hardware.test1', 'hardware.test2.abc'])
         self.assertIn(exts[1].name, ['hardware.test1', 'hardware.test2.abc'])

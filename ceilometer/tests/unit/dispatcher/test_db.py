@@ -13,36 +13,22 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 import datetime
-import uuid
 
 import mock
-from oslo_config import fixture as fixture_config
 from oslotest import base
 
 from ceilometer.dispatcher import database
-from ceilometer.event.storage import models as event_models
 from ceilometer.publisher import utils
+from ceilometer import service
 
 
 class TestDispatcherDB(base.BaseTestCase):
 
     def setUp(self):
         super(TestDispatcherDB, self).setUp()
-        self.CONF = self.useFixture(fixture_config.Config()).conf
+        self.CONF = service.prepare_service([], [])
         self.CONF.set_override('connection', 'sqlite://', group='database')
-        self.dispatcher = database.DatabaseDispatcher(self.CONF)
-        self.ctx = None
-
-    def test_event_conn(self):
-        event = event_models.Event(uuid.uuid4(), 'test',
-                                   datetime.datetime(2012, 7, 2, 13, 53, 40),
-                                   [], {})
-        event = utils.message_from_event(event,
-                                         self.CONF.publisher.telemetry_secret)
-        with mock.patch.object(self.dispatcher.event_conn,
-                               'record_events') as record_events:
-            self.dispatcher.record_events(event)
-        self.assertEqual(1, len(record_events.call_args_list[0][0][0]))
+        self.meter_dispatcher = database.MeterDatabaseDispatcher(self.CONF)
 
     def test_valid_message(self):
         msg = {'counter_name': 'test',
@@ -53,9 +39,9 @@ class TestDispatcherDB(base.BaseTestCase):
             msg, self.CONF.publisher.telemetry_secret,
         )
 
-        with mock.patch.object(self.dispatcher.meter_conn,
+        with mock.patch.object(self.meter_dispatcher.conn,
                                'record_metering_data') as record_metering_data:
-            self.dispatcher.record_metering_data(msg)
+            self.meter_dispatcher.record_metering_data(msg)
 
         record_metering_data.assert_called_once_with(msg)
 
@@ -72,9 +58,9 @@ class TestDispatcherDB(base.BaseTestCase):
         expected = msg.copy()
         expected['timestamp'] = datetime.datetime(2012, 7, 2, 13, 53, 40)
 
-        with mock.patch.object(self.dispatcher.meter_conn,
+        with mock.patch.object(self.meter_dispatcher.conn,
                                'record_metering_data') as record_metering_data:
-            self.dispatcher.record_metering_data(msg)
+            self.meter_dispatcher.record_metering_data(msg)
 
         record_metering_data.assert_called_once_with(expected)
 
@@ -92,8 +78,8 @@ class TestDispatcherDB(base.BaseTestCase):
         expected['timestamp'] = datetime.datetime(2012, 9, 30, 23,
                                                   31, 50, 262000)
 
-        with mock.patch.object(self.dispatcher.meter_conn,
+        with mock.patch.object(self.meter_dispatcher.conn,
                                'record_metering_data') as record_metering_data:
-            self.dispatcher.record_metering_data(msg)
+            self.meter_dispatcher.record_metering_data(msg)
 
         record_metering_data.assert_called_once_with(expected)

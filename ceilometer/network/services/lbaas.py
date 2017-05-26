@@ -16,7 +16,6 @@
 import abc
 import collections
 
-from oslo_config import cfg
 from oslo_log import log
 import six
 
@@ -37,16 +36,17 @@ LOAD_BALANCER_STATUS_V2 = {
     'online': 1,
     'no_monitor': 3,
     'error': 4,
-    'degraded': 5
+    'degraded': 5,
+    'disabled': 6
 }
 
 
 class BaseLBPollster(base.BaseServicesPollster):
     """Base Class for Load Balancer pollster"""
 
-    def __init__(self):
-        super(BaseLBPollster, self).__init__()
-        self.lb_version = cfg.CONF.service_types.neutron_lbaas_version
+    def __init__(self, conf):
+        super(BaseLBPollster, self).__init__(conf)
+        self.lb_version = self.conf.service_types.neutron_lbaas_version
 
     def get_load_balancer_status_id(self, value):
         if self.lb_version == 'v1':
@@ -225,10 +225,10 @@ class _LBStatsPollster(base.BaseServicesPollster):
      and bandwidth.
     """
 
-    def __init__(self):
-        super(_LBStatsPollster, self).__init__()
-        self.client = neutron_client.Client()
-        self.lb_version = cfg.CONF.service_types.neutron_lbaas_version
+    def __init__(self, conf):
+        super(_LBStatsPollster, self).__init__(conf)
+        self.client = neutron_client.Client(self.conf)
+        self.lb_version = self.conf.service_types.neutron_lbaas_version
 
     @staticmethod
     def make_sample_from_pool(pool, name, type, unit, volume,
@@ -288,7 +288,7 @@ class _LBStatsPollster(base.BaseServicesPollster):
                     c_data = self._populate_stats_cache(pool['id'], cache)
                     yield self._get_sample(pool, c_data)
                 except Exception:
-                    LOG.exception(_('Ignoring pool %(pool_id)s'),
+                    LOG.exception('Ignoring pool %(pool_id)s',
                                   {'pool_id': pool['id']})
         elif self.lb_version == 'v2':
             for loadbalancer in resources:
@@ -298,8 +298,7 @@ class _LBStatsPollster(base.BaseServicesPollster):
                     yield self._get_sample(loadbalancer, c_data)
                 except Exception:
                     LOG.exception(
-                        _('Ignoring '
-                          'loadbalancer %(loadbalancer_id)s'),
+                        'Ignoring loadbalancer %(loadbalancer_id)s',
                         {'loadbalancer_id': loadbalancer['id']})
 
 

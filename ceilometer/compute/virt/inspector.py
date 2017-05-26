@@ -21,102 +21,81 @@ from oslo_log import log
 from stevedore import driver
 
 import ceilometer
-from ceilometer.i18n import _
 
 
 OPTS = [
     cfg.StrOpt('hypervisor_inspector',
                default='libvirt',
                help='Inspector to use for inspecting the hypervisor layer. '
-                    'Known inspectors are libvirt, hyperv, vmware, xenapi '
-                    'and powervm.'),
+                    'Known inspectors are libvirt, hyperv, vsphere '
+                    'and xenapi.'),
 ]
-
-cfg.CONF.register_opts(OPTS)
 
 
 LOG = log.getLogger(__name__)
 
-# Named tuple representing instances.
-#
-# name: the name of the instance
-# uuid: the UUID associated with the instance
-#
-Instance = collections.namedtuple('Instance', ['name', 'UUID'])
+
+# Named tuple representing instance statistics
+
+class InstanceStats(object):
+    fields = [
+        'cpu_number',              # number: number of CPUs
+        'cpu_time',                # time: cumulative CPU time
+        'cpu_util',                # util: CPU utilization in percentage
+        'cpu_l3_cache_usage',      # cachesize: Amount of CPU L3 cache used
+        'memory_usage',            # usage: Amount of memory used
+        'memory_resident',         #
+        'memory_bandwidth_total',  # total: total system bandwidth from one
+                                   #   level of cache
+        'memory_bandwidth_local',  # local: bandwidth of memory traffic for a
+                                   #   memory controller
+        'cpu_cycles',              # cpu_cycles: the number of cpu cycles one
+                                   #   instruction needs
+        'instructions',            # instructions: the count of instructions
+        'cache_references',        # cache_references: the count of cache hits
+        'cache_misses',            # cache_misses: the count of caches misses
+    ]
+
+    def __init__(self, **kwargs):
+        for k in self.fields:
+            setattr(self, k, kwargs.pop(k, None))
+        if kwargs:
+            raise AttributeError(
+                "'InstanceStats' object has no attributes '%s'" % kwargs)
 
 
-# Named tuple representing CPU statistics.
-#
-# number: number of CPUs
-# time: cumulative CPU time
-#
-CPUStats = collections.namedtuple('CPUStats', ['number', 'time'])
-
-# Named tuple representing CPU Utilization statistics.
-#
-# util: CPU utilization in percentage
-#
-CPUUtilStats = collections.namedtuple('CPUUtilStats', ['util'])
-
-# Named tuple representing CPU L3 cache usage statistics.
-#
-# cachesize: Amount of CPU L3 cache used
-#
-CPUL3CacheUsageStats = collections.namedtuple('CPUL3CacheUsageStats',
-                                              ['l3_cache_usage'])
-
-# Named tuple representing Memory usage statistics.
-#
-# usage: Amount of memory used
-#
-MemoryUsageStats = collections.namedtuple('MemoryUsageStats', ['usage'])
-
-
-# Named tuple representing Resident Memory usage statistics.
-#
-# resident: Amount of resident memory
-#
-MemoryResidentStats = collections.namedtuple('MemoryResidentStats',
-                                             ['resident'])
-
-
-# Named tuple representing vNICs.
+# Named tuple representing vNIC statistics.
 #
 # name: the name of the vNIC
 # mac: the MAC address
 # fref: the filter ref
 # parameters: miscellaneous parameters
-#
-Interface = collections.namedtuple('Interface', ['name', 'mac',
-                                                 'fref', 'parameters'])
-
-
-# Named tuple representing vNIC statistics.
-#
 # rx_bytes: number of received bytes
 # rx_packets: number of received packets
 # tx_bytes: number of transmitted bytes
 # tx_packets: number of transmitted packets
 #
 InterfaceStats = collections.namedtuple('InterfaceStats',
-                                        ['rx_bytes', 'rx_packets',
-                                         'tx_bytes', 'tx_packets'])
+                                        ['name', 'mac', 'fref', 'parameters',
+                                         'rx_bytes', 'tx_bytes',
+                                         'rx_packets', 'tx_packets',
+                                         'rx_drop', 'tx_drop',
+                                         'rx_errors', 'tx_errors'])
 
 
 # Named tuple representing vNIC rate statistics.
 #
+# name: the name of the vNIC
+# mac: the MAC address
+# fref: the filter ref
+# parameters: miscellaneous parameters
 # rx_bytes_rate: rate of received bytes
 # tx_bytes_rate: rate of transmitted bytes
 #
 InterfaceRateStats = collections.namedtuple('InterfaceRateStats',
-                                            ['rx_bytes_rate', 'tx_bytes_rate'])
-
-
-# Named tuple representing disks.
-#
-# device: the device name for the disk
-#
-Disk = collections.namedtuple('Disk', ['device'])
+                                            ['name', 'mac',
+                                             'fref', 'parameters',
+                                             'rx_bytes_rate', 'tx_bytes_rate'])
 
 
 # Named tuple representing disk statistics.
@@ -128,7 +107,8 @@ Disk = collections.namedtuple('Disk', ['device'])
 # errors: number of errors
 #
 DiskStats = collections.namedtuple('DiskStats',
-                                   ['read_bytes', 'read_requests',
+                                   ['device',
+                                    'read_bytes', 'read_requests',
                                     'write_bytes', 'write_requests',
                                     'errors'])
 
@@ -140,7 +120,8 @@ DiskStats = collections.namedtuple('DiskStats',
 # write_requests_rate: number of write operations per second
 #
 DiskRateStats = collections.namedtuple('DiskRateStats',
-                                       ['read_bytes_rate',
+                                       ['device',
+                                        'read_bytes_rate',
                                         'read_requests_rate',
                                         'write_bytes_rate',
                                         'write_requests_rate'])
@@ -150,14 +131,14 @@ DiskRateStats = collections.namedtuple('DiskRateStats',
 # disk_latency: average disk latency
 #
 DiskLatencyStats = collections.namedtuple('DiskLatencyStats',
-                                          ['disk_latency'])
+                                          ['device', 'disk_latency'])
 
 # Named tuple representing disk iops statistics.
 #
 # iops: number of iops per second
 #
 DiskIOPSStats = collections.namedtuple('DiskIOPSStats',
-                                       ['iops_count'])
+                                       ['device', 'iops_count'])
 
 
 # Named tuple representing disk Information.
@@ -167,7 +148,8 @@ DiskIOPSStats = collections.namedtuple('DiskIOPSStats',
 # physical: usage of the disk
 
 DiskInfo = collections.namedtuple('DiskInfo',
-                                  ['capacity',
+                                  ['device',
+                                   'capacity',
                                    'allocation',
                                    'physical'])
 
@@ -187,15 +169,7 @@ class InstanceShutOffException(InspectorException):
     pass
 
 
-class InstanceNoDataException(InspectorException):
-    pass
-
-
 class NoDataException(InspectorException):
-    pass
-
-
-class NoSanityException(InspectorException):
     pass
 
 
@@ -203,50 +177,31 @@ class NoSanityException(InspectorException):
 #
 class Inspector(object):
 
-    def check_sanity(self):
-        """Check the sanity of hypervisor inspector.
+    def __init__(self, conf):
+        self.conf = conf
 
-        Each subclass could overwrite it to throw any exception
-        when detecting mis-configured inspector
-        """
-        pass
-
-    def inspect_cpus(self, instance):
+    def inspect_instance(self, instance, duration):
         """Inspect the CPU statistics for an instance.
-
-        :param instance: the target instance
-        :return: the number of CPUs and cumulative CPU time
-        """
-        raise ceilometer.NotImplementedError
-
-    def inspect_cpu_util(self, instance, duration=None):
-        """Inspect the CPU Utilization (%) for an instance.
 
         :param instance: the target instance
         :param duration: the last 'n' seconds, over which the value should be
                inspected
-        :return: the percentage of CPU utilization
+        :return: the instance stats
         """
         raise ceilometer.NotImplementedError
 
-    def inspect_cpu_l3_cache(self, instance):
-        """Inspect the CPU L3 cache usage for an instance.
-
-        :param instance: the target instance
-        :return: the amount of cpu l3 cache used
-        """
-        raise ceilometer.NotImplementedError
-
-    def inspect_vnics(self, instance):
+    def inspect_vnics(self, instance, duration):
         """Inspect the vNIC statistics for an instance.
 
         :param instance: the target instance
+        :param duration: the last 'n' seconds, over which the value should be
+               inspected
         :return: for each vNIC, the number of bytes & packets
                  received and transmitted
         """
         raise ceilometer.NotImplementedError
 
-    def inspect_vnic_rates(self, instance, duration=None):
+    def inspect_vnic_rates(self, instance, duration):
         """Inspect the vNIC rate statistics for an instance.
 
         :param instance: the target instance
@@ -257,36 +212,18 @@ class Inspector(object):
         """
         raise ceilometer.NotImplementedError
 
-    def inspect_disks(self, instance):
+    def inspect_disks(self, instance, duration):
         """Inspect the disk statistics for an instance.
 
         :param instance: the target instance
+        :param duration: the last 'n' seconds, over which the value should be
+               inspected
         :return: for each disk, the number of bytes & operations
                  read and written, and the error count
         """
         raise ceilometer.NotImplementedError
 
-    def inspect_memory_usage(self, instance, duration=None):
-        """Inspect the memory usage statistics for an instance.
-
-        :param instance: the target instance
-        :param duration: the last 'n' seconds, over which the value should be
-               inspected
-        :return: the amount of memory used
-        """
-        raise ceilometer.NotImplementedError
-
-    def inspect_memory_resident(self, instance, duration=None):
-        """Inspect the resident memory statistics for an instance.
-
-        :param instance: the target instance
-        :param duration: the last 'n' seconds, over which the value should be
-               inspected
-        :return: the amount of resident memory
-        """
-        raise ceilometer.NotImplementedError
-
-    def inspect_disk_rates(self, instance, duration=None):
+    def inspect_disk_rates(self, instance, duration):
         """Inspect the disk statistics as rates for an instance.
 
         :param instance: the target instance
@@ -297,38 +234,45 @@ class Inspector(object):
         """
         raise ceilometer.NotImplementedError
 
-    def inspect_disk_latency(self, instance):
+    def inspect_disk_latency(self, instance, duration):
         """Inspect the disk statistics as rates for an instance.
 
         :param instance: the target instance
+        :param duration: the last 'n' seconds, over which the value should be
+               inspected
         :return: for each disk, the average disk latency
         """
         raise ceilometer.NotImplementedError
 
-    def inspect_disk_iops(self, instance):
+    def inspect_disk_iops(self, instance, duration):
         """Inspect the disk statistics as rates for an instance.
 
         :param instance: the target instance
+        :param duration: the last 'n' seconds, over which the value should be
+               inspected
         :return: for each disk, the number of iops per second
         """
         raise ceilometer.NotImplementedError
 
-    def inspect_disk_info(self, instance):
+    def inspect_disk_info(self, instance, duration):
         """Inspect the disk information for an instance.
 
         :param instance: the target instance
+        :param duration: the last 'n' seconds, over which the value should be
+               inspected
         :return: for each disk , capacity , allocation and usage
         """
         raise ceilometer.NotImplementedError
 
 
-def get_hypervisor_inspector():
+def get_hypervisor_inspector(conf):
     try:
         namespace = 'ceilometer.compute.virt'
         mgr = driver.DriverManager(namespace,
-                                   cfg.CONF.hypervisor_inspector,
-                                   invoke_on_load=True)
+                                   conf.hypervisor_inspector,
+                                   invoke_on_load=True,
+                                   invoke_args=(conf, ))
         return mgr.driver
     except ImportError as e:
-        LOG.error(_("Unable to load the hypervisor inspector: %s") % e)
-        return Inspector()
+        LOG.error("Unable to load the hypervisor inspector: %s" % e)
+        return Inspector(conf)

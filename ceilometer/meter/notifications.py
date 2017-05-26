@@ -10,32 +10,44 @@
 # WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and limitations
 # under the License.
-
+import glob
 import itertools
+import os
+
 import pkg_resources
 import six
 
 from oslo_config import cfg
 from oslo_log import log
-import oslo_messaging
 from oslo_utils import fnmatch
 from stevedore import extension
 
-from ceilometer.agent import plugin_base
 from ceilometer import declarative
-from ceilometer.i18n import _LE, _LW
-from ceilometer import sample
+from ceilometer.i18n import _
+from ceilometer import notification
+from ceilometer import sample as sample_util
 
 OPTS = [
     cfg.StrOpt('meter_definitions_cfg_file',
-               default="meters.yaml",
-               help="Configuration file for defining meter notifications."
+               deprecated_for_removal=True,
+               help="Configuration file for defining meter "
+                    "notifications. This option is deprecated "
+                    "and use meter_definitions_dirs to "
+                    "configure meter notification file. Meter "
+                    "definitions configuration file will be sought "
+                    "according to the parameter."
                ),
+    cfg.MultiStrOpt('meter_definitions_dirs',
+                    default=["/etc/ceilometer/meters.d",
+                             os.path.abspath(
+                                 os.path.join(
+                                     os.path.split(
+                                         os.path.dirname(__file__))[0],
+                                     "data", "meters.d"))],
+                    help="List directory to find files of "
+                         "defining meter notifications."
+                    ),
 ]
-
-cfg.CONF.register_opts(OPTS, group='meter')
-cfg.CONF.import_opt('disable_non_metric_meters', 'ceilometer.notification',
-                    group='notification')
 
 LOG = log.getLogger(__name__)
 
@@ -48,22 +60,23 @@ class MeterDefinition(object):
     REQUIRED_FIELDS = ['name', 'type', 'event_type', 'unit', 'volume',
                        'resource_id']
 
-    def __init__(self, definition_cfg, plugin_manager):
+    def __init__(self, definition_cfg, conf, plugin_manager):
+        self.conf = conf
         self.cfg = definition_cfg
         missing = [field for field in self.REQUIRED_FIELDS
                    if not self.cfg.get(field)]
         if missing:
             raise declarative.MeterDefinitionException(
-                _LE("Required fields %s not specified") % missing, self.cfg)
+                _("Required fields %s not specified") % missing, self.cfg)
 
         self._event_type = self.cfg.get('event_type')
         if isinstance(self._event_type, six.string_types):
             self._event_type = [self._event_type]
 
         if ('type' not in self.cfg.get('lookup', []) and
-                self.cfg['type'] not in sample.TYPES):
+                self.cfg['type'] not in sample_util.TYPES):
             raise declarative.MeterDefinitionException(
-                _LE("Invalid type %s specified") % self.cfg['type'], self.cfg)
+                _("Invalid type %s specified") % self.cfg['type'], self.cfg)
 
         self._fallback_user_id = declarative.Definition(
             'user_id', "_context_user_id|_context_user", plugin_manager)
@@ -71,6 +84,7 @@ class MeterDefinition(object):
             'project_id', "_context_tenant_id|_context_tenant", plugin_manager)
         self._attributes = {}
         self._metadata_attributes = {}
+        self._user_meta = None
 
         for name in self.SAMPLE_ATTRIBUTES:
             attr_cfg = self.cfg.get(name)
@@ -81,6 +95,10 @@ class MeterDefinition(object):
         for name in metadata:
             self._metadata_attributes[name] = declarative.Definition(
                 name, metadata[name], plugin_manager)
+        user_meta = self.cfg.get('user_metadata')
+        if user_meta:
+            self._user_meta = declarative.Definition(None, user_meta,
+                                                     plugin_manager)
 
         # List of fields we expected when multiple meter are in the payload
         self.lookup = self.cfg.get('lookup')
@@ -105,6 +123,12 @@ class MeterDefinition(object):
             value = parser.parse(message)
             if value:
                 sample['metadata'][name] = value
+
+        if self._user_meta:
+            meta = self._user_meta.parse(message)
+            if meta:
+                sample_util.add_reserved_user_metadata(
+                    self.conf, meta, sample['metadata'])
 
         # NOTE(sileht): We expect multiple samples in the payload
         # so put each attribute into a list
@@ -158,7 +182,7 @@ class MeterDefinition(object):
             yield sample
 
 
-class ProcessMeterNotifications(plugin_base.NotificationBase):
+class ProcessMeterNotifications(notification.NotificationProcessBase):
 
     event_types = []
 
@@ -166,65 +190,42 @@ class ProcessMeterNotifications(plugin_base.NotificationBase):
         super(ProcessMeterNotifications, self).__init__(manager)
         self.definitions = self._load_definitions()
 
-    @staticmethod
-    def _load_definitions():
+    def _load_definitions(self):
         plugin_manager = extension.ExtensionManager(
             namespace='ceilometer.event.trait_plugin')
-        meters_cfg = declarative.load_definitions(
-            {}, cfg.CONF.meter.meter_definitions_cfg_file,
-            pkg_resources.resource_filename(__name__, "data/meters.yaml"))
-
         definitions = {}
-        for meter_cfg in reversed(meters_cfg['metric']):
-            if meter_cfg.get('name') in definitions:
-                # skip duplicate meters
-                LOG.warning(_LW("Skipping duplicate meter definition %s")
-                            % meter_cfg)
-                continue
-            if (meter_cfg.get('volume') != 1
-                    or not cfg.CONF.notification.disable_non_metric_meters):
+        mfs = []
+        for dir in self.manager.conf.meter.meter_definitions_dirs:
+            for filepath in sorted(glob.glob(os.path.join(dir, "*.yaml"))):
+                if filepath is not None:
+                    mfs.append(filepath)
+        if self.manager.conf.meter.meter_definitions_cfg_file is not None:
+            mfs.append(
+                pkg_resources.resource_filename(
+                    self.manager.conf.meter.meter_definitions_cfg_file)
+            )
+        for mf in mfs:
+            meters_cfg = declarative.load_definitions(
+                self.manager.conf, {}, mf)
+
+            for meter_cfg in reversed(meters_cfg['metric']):
+                if meter_cfg.get('name') in definitions:
+                    # skip duplicate meters
+                    LOG.warning("Skipping duplicate meter definition %s"
+                                % meter_cfg)
+                    continue
                 try:
-                    md = MeterDefinition(meter_cfg, plugin_manager)
+                    md = MeterDefinition(meter_cfg, self.manager.conf,
+                                         plugin_manager)
                 except declarative.DefinitionException as e:
-                    errmsg = _LE("Error loading meter definition: %s")
+                    errmsg = "Error loading meter definition: %s"
                     LOG.error(errmsg, six.text_type(e))
                 else:
                     definitions[meter_cfg['name']] = md
         return definitions.values()
 
-    def get_targets(self, conf):
-        """Return a sequence of oslo_messaging.Target
-
-        It is defining the exchange and topics to be connected for this plugin.
-        :param conf: Configuration.
-        #TODO(prad): This should be defined in the notification agent
-        """
-        targets = []
-        exchanges = [
-            conf.nova_control_exchange,
-            conf.cinder_control_exchange,
-            conf.glance_control_exchange,
-            conf.neutron_control_exchange,
-            conf.heat_control_exchange,
-            conf.keystone_control_exchange,
-            conf.sahara_control_exchange,
-            conf.trove_control_exchange,
-            conf.zaqar_control_exchange,
-            conf.swift_control_exchange,
-            conf.ceilometer_control_exchange,
-            conf.magnum_control_exchange,
-            conf.dns_control_exchange,
-            ]
-
-        for exchange in exchanges:
-            targets.extend(oslo_messaging.Target(topic=topic,
-                                                 exchange=exchange)
-                           for topic in
-                           self.get_notification_topics(conf))
-        return targets
-
     def process_notification(self, notification_body):
         for d in self.definitions:
             if d.match_type(notification_body['event_type']):
                 for s in d.to_samples(notification_body):
-                    yield sample.Sample.from_notification(**s)
+                    yield sample_util.Sample.from_notification(**s)

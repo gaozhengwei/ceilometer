@@ -13,46 +13,12 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-from oslo_config import cfg
-import oslo_messaging
-
-from ceilometer.agent import plugin_base
+from ceilometer import notification
 from ceilometer import sample
 
-cfg.CONF.import_opt('nova_control_exchange',
-                    'ceilometer.compute.notifications')
-cfg.CONF.import_opt('glance_control_exchange',
-                    'ceilometer.notification')
-cfg.CONF.import_opt('neutron_control_exchange',
-                    'ceilometer.network.notifications')
-cfg.CONF.import_opt('cinder_control_exchange',
-                    'ceilometer.notification')
 
-OPTS = [
-    cfg.MultiStrOpt('http_control_exchanges',
-                    default=[cfg.CONF.nova_control_exchange,
-                             cfg.CONF.glance_control_exchange,
-                             cfg.CONF.neutron_control_exchange,
-                             cfg.CONF.cinder_control_exchange],
-                    help="Exchanges name to listen for notifications."),
-]
-
-cfg.CONF.register_opts(OPTS)
-
-
-class HTTPRequest(plugin_base.NotificationBase,
-                  plugin_base.NonMetricNotificationBase):
+class HTTPRequest(notification.NotificationProcessBase):
     event_types = ['http.request']
-
-    def get_targets(self, conf):
-        """Return a sequence of oslo_messaging.Target
-
-        This sequence is defining the exchange and topics to be connected for
-        this plugin.
-        """
-        return [oslo_messaging.Target(topic=topic, exchange=exchange)
-                for topic in self.get_notification_topics(conf)
-                for exchange in conf.http_control_exchanges]
 
     def process_notification(self, message):
         yield sample.Sample.from_notification(

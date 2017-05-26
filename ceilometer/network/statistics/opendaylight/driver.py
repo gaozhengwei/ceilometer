@@ -18,7 +18,6 @@ import six
 from six import moves
 from six.moves.urllib import parse as urlparse
 
-from ceilometer.i18n import _
 from ceilometer.network.statistics import driver
 from ceilometer.network.statistics.opendaylight import client
 from ceilometer import utils
@@ -81,8 +80,7 @@ class OpenDayLightDriver(driver.Driver):
       http://127.0.0.1:8080/controller/nb/v2/statistics/default/flow
       http://127.0.0.1:8080/controller/nb/v2/statistics/egg/flow
     """
-    @staticmethod
-    def _prepare_cache(endpoint, params, cache):
+    def _prepare_cache(self, endpoint, params, cache):
 
         if 'network.statistics.opendaylight' in cache:
             return cache['network.statistics.opendaylight']
@@ -98,7 +96,7 @@ class OpenDayLightDriver(driver.Driver):
             odl_params['user'] = params['user'][0]
         if 'password' in params:
             odl_params['password'] = params['password'][0]
-        cs = client.Client(endpoint, odl_params)
+        cs = client.Client(self.conf, endpoint, odl_params)
 
         for container_name in container_names:
             try:
@@ -162,8 +160,8 @@ class OpenDayLightDriver(driver.Driver):
                     cs.host_tracker.get_inactive_hosts(container_name))
                 data[container_name] = container_data
             except Exception:
-                LOG.exception(_('Request failed to connect to OpenDaylight'
-                                ' with NorthBound REST API'))
+                LOG.exception('Request failed to connect to OpenDaylight'
+                              ' with NorthBound REST API')
 
         cache['network.statistics.opendaylight'] = data
 
